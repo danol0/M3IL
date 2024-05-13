@@ -1,0 +1,4 @@
+trainold.py
+data/*
+*.pyc
+*.ipynb
