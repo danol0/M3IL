@@ -4,6 +4,57 @@ from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn.functional as F
 from lifelines.utils import concordance_index
+from sklearn.metrics import roc_auc_score
+from src.networks import MaxNet, QBTNet
+import pickle
+from collections import defaultdict
+
+
+def define_model(opt, k):
+    omic_dim = 320 if opt.use_rna else 80
+    if opt.model == "omic":
+        model = MaxNet(input_dim=omic_dim, omic_dim=32, dropout=opt.dropout)
+    if opt.model == "qbt":
+        model = QBTNet(
+            k,
+            feature_dim=32,
+            n_queries=16,
+            batch_size=opt.batch_size,
+            transformer_layers=12,
+            dropout=opt.dropout,
+            omic_xdim=omic_dim,
+        )
+    else:
+        raise NotImplementedError(f"Model {opt.model} not implemented")
+    return model
+
+
+@torch.no_grad()
+def evaluate(model, data_loader, opt):
+    all_grade, all_surv, loss = [], [], 0
+    model.eval()
+    for omics, path, censored, time, grade in data_loader:
+        _, grade_pred, surv_pred = model(x_omic=omics, x_path=path)
+        loss += loss_fn(
+            model, grade, time, censored, grade_pred, surv_pred, opt
+        ).item() * len(grade)
+        grade_onehot = np.eye(3)[grade.cpu().numpy()]
+        all_grade.append([grade_pred.cpu().numpy(), grade_onehot])
+        all_surv.append(
+            [surv_pred.cpu().numpy(), censored.cpu().numpy(), time.cpu().numpy()]
+        )
+    acc = (
+        np.vstack([x[0] for x in all_grade]).argmax(axis=1)
+        == np.vstack([x[1] for x in all_grade]).argmax(axis=1)
+    ).mean()
+    auc = roc_auc_score(
+        np.concatenate([x[1] for x in all_grade]),
+        np.concatenate([x[0] for x in all_grade]),
+        average="micro",
+    )
+    c = calc_cindex(all_surv)
+    loss /= len(data_loader.dataset)
+    return loss, acc, auc, c
 
 
 def calc_cindex(all_surv):
@@ -13,8 +64,14 @@ def calc_cindex(all_surv):
     return concordance_index(all_time, -all_preds, all_censor)
 
 
-def loss_fn(model, grade, time, censored, grade_pred, surv_pred):
-    return F.nll_loss(grade_pred, grade) + 3e-4 * l1_reg(model) + CoxLoss(time, censored, surv_pred)
+def loss_fn(model, grade, time, censored, grade_pred, surv_pred, opt):
+    w_nll = 0 if opt.task == "surv" else 1
+    w_cox = 0 if opt.task == "grad" else 1
+    return (
+        w_nll * F.nll_loss(grade_pred, grade)
+        + opt.w_reg * l1_reg(model)
+        + w_cox * CoxLoss(time, censored, surv_pred)
+    )
 
 
 def lambda_rule(epoch, epoch_count=0, niter=0, niter_decay=50):
@@ -34,8 +91,8 @@ def CoxLoss(survtime, censor, hazard_pred):
     return loss_cox
 
 
-def get_splits(data_dir="./data", use_rnaseq=False):
-    metadata, dataset = getCleanAllDataset(use_rnaseq=use_rnaseq)
+def get_splits(opt, data_dir="./data"):
+    metadata, dataset = getCleanAllDataset(use_rnaseq=opt.use_rna)
     split_data = {}
 
     pnas_splits = pd.read_csv(f"{data_dir}/splits/pnas_splits.csv")
@@ -43,11 +100,20 @@ def get_splits(data_dir="./data", use_rnaseq=False):
     pnas_splits.set_index("TCGA ID", inplace=True)
     pnas_splits = pnas_splits.map(lambda x: x.lower())
 
-    for k in range(1, 16):
+    vgg_ftype = "surv" if opt.task == "multi" else opt.task
+    vgg_feats = pickle.load(open(f"{data_dir}/vgg_features_{vgg_ftype}.pkl", "rb"))
+    pat2img = defaultdict(list)
+    for img_fname in vgg_feats.keys():
+        pat2img[img_fname[:12]].append(img_fname)
+
+    for k in range(1, opt.n_folds + 1):
         split_data[k] = {
             split: {
                 pat: {
                     "x_omic": dataset.loc[pat].drop(metadata).values.astype(np.float32),
+                    "x_path": np.stack(
+                        [vgg_feats[img_fname] for img_fname in pat2img[pat]]
+                    ),
                     "y": [
                         dataset.loc[pat]["censored"],
                         dataset.loc[pat]["Survival months"],

@@ -12,9 +12,17 @@ class omicDataset(Dataset):
 
     def __getitem__(self, idx):
         pname = self.patnames[idx]
-        omics = torch.tensor(self.data[pname]['x_omic']).type(torch.FloatTensor)
-        censored, time, grade = [torch.tensor(self.data[pname]['y'][i]).type(torch.LongTensor) for i in range(3)]
-        return (omics, censored, time, grade)
+        omics = torch.tensor(self.data[pname]["x_omic"]).type(torch.FloatTensor)
+
+        imgs = self.data[pname]["x_path"]
+        idxs = np.random.choice(len(imgs), 9, replace=False)
+        imgs = torch.tensor(imgs[idxs]).type(torch.FloatTensor).squeeze(1)
+
+        censored, time, grade = [
+            torch.tensor(self.data[pname]["y"][i]).type(torch.LongTensor)
+            for i in range(3)
+        ]
+        return (omics, imgs, censored, time, grade)
 
     def __len__(self):
         return len(self.patnames)

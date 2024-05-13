@@ -2,63 +2,44 @@ import torch
 from accelerate import Accelerator
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from src.networks import MaxNet
-from src.utils import get_splits, lambda_rule, loss_fn, calc_cindex
+from src.utils import get_splits, lambda_rule, loss_fn, calc_cindex, evaluate, define_model
 from src.data_loaders import omicDataset
 import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
 from tabulate import tabulate
+from src.options import parse_args
 
 # from torch.profiler import profile, record_function, ProfilerActivity
 
-torch.manual_seed(0)
-np.random.seed(0)
+torch.manual_seed(2019)
+np.random.seed(2019)
 
 
-@torch.no_grad()
-def test(model, test_loader):
-    test_loss, test_acc, all_surv_test = 0, 0, []
-    model.eval()
-    for omics, censored, time, grade in test_loader:
-        _, grade_pred, surv_pred = model(x_omic=omics)
-        loss = loss_fn(model, grade, time, censored, grade_pred, surv_pred)
-        test_acc += (grade_pred.argmax(dim=1) == grade).sum().item()
-        test_loss += loss.item() * len(grade)
-        all_surv_test.append(
-            [surv_pred.cpu().numpy(), censored.cpu().numpy(), time.cpu().numpy()]
-        )
-    return test_loss, test_acc, all_surv_test
-
-
-def train(n_epochs, model, split_data, verbose=True):
-    accelerator = Accelerator(cpu=True)
-    device = accelerator.device
-    print(f"Device: {device}") if verbose else None
-
+def train(model, split_data, accelerator, opt, verbose=True):
+    drop_last = True if opt.model == 'qbt' else False
     train_loader, test_loader = (
-        DataLoader(omicDataset(split_data, s), batch_size=64, shuffle=True)
+        DataLoader(omicDataset(split_data, s), batch_size=opt.batch_size, shuffle=True, drop_last=drop_last)
         for s in ["train", "test"]
     )
 
-    optim = torch.optim.Adam(model.parameters(), betas=(0.9, 0.999), lr=0.002)
+    optim = torch.optim.Adam(model.parameters(), betas=(0.9, 0.999), lr=opt.lr)
     scheduler = lr_scheduler.LambdaLR(optim, lr_lambda=lambda_rule)
-    model, optim, train_loader, test_loader = accelerator.prepare(
-        model, optim, train_loader, test_loader
+    model, train_loader, test_loader, optim, scheduler = accelerator.prepare(
+        model, train_loader, test_loader, optim, scheduler
     )
 
-    train_len, test_len = len(train_loader.dataset), len(test_loader.dataset)
     pbar = tqdm(total=len(train_loader), position=0, leave=True, disable=not verbose)
-
-    for epoch in range(n_epochs):
+    for epoch in range(opt.n_epochs):
+        pbar.reset()
         model.train()
         train_loss, train_acc, all_surv_train = 0, 0, []
-
-        pbar.reset()
-        for omics, censored, time, grade in train_loader:
+        for omics, path, censored, time, grade in train_loader:
 
             optim.zero_grad()
-            _, grade_pred, surv_pred = model(x_omic=omics)
-            loss = loss_fn(model, grade, time, censored, grade_pred, surv_pred)
+            _, grade_pred, surv_pred = model(x_omic=omics, x_path=path)
+            loss = loss_fn(model, grade, time, censored, grade_pred, surv_pred, opt)
+            accelerator.backward(loss)
+            optim.step()
 
             train_acc += (grade_pred.argmax(dim=1) == grade).sum().item()
             train_loss += loss.item() * len(grade)
@@ -70,44 +51,58 @@ def train(n_epochs, model, split_data, verbose=True):
                 ]
             )
 
-            accelerator.backward(loss)
-            optim.step()
             pbar.update(1)
+            pbar.refresh()
 
         scheduler.step()
-        test_loss, test_acc, all_surv_test = test(model, test_loader)
-
-        c_train, c_test = calc_cindex(all_surv_train), calc_cindex(all_surv_test)
+        train_loss /= len(train_loader.dataset)
+        train_acc /= len(train_loader.dataset)
+        c_train = calc_cindex(all_surv_train)
+        test_loss, test_acc, _, test_cindx = evaluate(model, test_loader, opt)
 
         pbar.set_description(
-            f"Epoch {epoch} | Loss: {train_loss/train_len:.2}/{test_loss/test_len:.2} | Acc: {train_acc/train_len:.2}/{test_acc/test_len:.2}, C-Index: {c_train:.2}/{c_test:.2}"
+            f"Epoch {epoch} | Loss: {train_loss:.2f}/{test_loss:.2f} | Acc: {train_acc:.2f}/{test_acc:.2f}, C-Index: {c_train:.2f}/{test_cindx:.2f}"
         )
+        pbar.refresh()
 
     metrics = []
     for loader, name in [(train_loader, "Train"), (test_loader, "Test")]:
-        loss, acc, all_surv = test(model, loader)
-        c = calc_cindex(all_surv)
-        metrics.append([name, loss / len(loader.dataset), acc / len(loader.dataset), c])
+        metrics.append([name, *evaluate(model, loader, opt)])
 
     return model, metrics
 
 
 if __name__ == "__main__":
+    opt = parse_args()
+    accelerator = Accelerator(cpu=True, step_scheduler_with_optimizer=False)
+    device = accelerator.device
+    print(f"Device: {device}")
 
-    split_data = get_splits(use_rnaseq=True)
-    test_accs, test_c_idxs = [], []
-    for i in range(1, 16):
-        model = MaxNet(input_dim=320)
-        model, metrics = train(50, model, split_data[i])
+    split_data = get_splits(opt)
+    metrics_list = []
+
+    for i in range(1, opt.n_folds + 1):
+        model = define_model(opt, i)
+        model, metrics = train(model, split_data[i], accelerator, opt, verbose=True)
         print(
+            "\n",
             tabulate(
                 metrics,
-                headers=[f"Split {i}", "Loss", "Accuracy", "C-Index"],
-                floatfmt=".2f",
-            )
+                headers=[f"Split {i}", "Loss", "Accuracy", "AUC", "C-Index"],
+            ),
         )
-        test_accs.append(metrics[1][2])
-        test_c_idxs.append(metrics[1][3])
 
-    print(f"Mean test accuracy: {np.mean(test_accs):.2f}")
-    print(f"Mean test c-index: {np.mean(test_c_idxs):.2f}")
+        metrics_list.append(metrics[1][2:])
+
+    mean_std_metrics = [
+        ['Mean', *np.mean(metrics_list, axis=0)],
+        ['Std', *np.std(metrics_list, axis=0)]
+    ]
+
+    print(
+        "\n",
+        tabulate(
+            mean_std_metrics,
+            headers=["Accuracy", "AUC", "C-Index"],
+        ),
+    )
