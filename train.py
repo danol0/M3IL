@@ -2,12 +2,18 @@ import torch
 from accelerate import Accelerator
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from src.utils import get_splits, lambda_rule, loss_fn, calc_cindex, evaluate, define_model
-from src.data_loaders import omicDataset
+from src.datasets import pathologyDataset, select_min, get_splits
+from src.networks import define_model
 import numpy as np
-import torch.optim.lr_scheduler as lr_scheduler
-from tabulate import tabulate
 from src.options import parse_args
+from tabulate import tabulate
+from src.utils import (
+    loss_fn,
+    save_model,
+    evaluate,
+    define_scheduler,
+    make_results_table,
+)
 
 # from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -16,14 +22,20 @@ np.random.seed(2019)
 
 
 def train(model, split_data, accelerator, opt, verbose=True):
-    drop_last = True if opt.model == 'qbt' else False
     train_loader, test_loader = (
-        DataLoader(omicDataset(split_data, s), batch_size=opt.batch_size, shuffle=True, drop_last=drop_last)
+        DataLoader(
+            pathologyDataset(split_data, s),
+            batch_size=opt.batch_size,
+            shuffle=True,
+            collate_fn=select_min,
+        )
         for s in ["train", "test"]
     )
 
-    optim = torch.optim.Adam(model.parameters(), betas=(0.9, 0.999), lr=opt.lr)
-    scheduler = lr_scheduler.LambdaLR(optim, lr_lambda=lambda_rule)
+    optim = torch.optim.Adam(
+        model.parameters(), betas=(0.9, 0.999), lr=opt.lr, weight_decay=opt.l2
+    )
+    scheduler = define_scheduler(opt, optim)
     model, train_loader, test_loader, optim, scheduler = accelerator.prepare(
         model, train_loader, test_loader, optim, scheduler
     )
@@ -32,38 +44,28 @@ def train(model, split_data, accelerator, opt, verbose=True):
     for epoch in range(opt.n_epochs):
         pbar.reset()
         model.train()
-        train_loss, train_acc, all_surv_train = 0, 0, []
-        for omics, path, censored, time, grade in train_loader:
+
+        if epoch == 10 and opt.model == "qbt":
+            model.omic_net.freeze(False)
+
+        for omics, path, event, time, grade, _ in train_loader:
 
             optim.zero_grad()
             _, grade_pred, surv_pred = model(x_omic=omics, x_path=path)
-            loss = loss_fn(model, grade, time, censored, grade_pred, surv_pred, opt)
+            loss = loss_fn(model, grade, time, event, grade_pred, surv_pred, opt)
             accelerator.backward(loss)
             optim.step()
-
-            train_acc += (grade_pred.argmax(dim=1) == grade).sum().item()
-            train_loss += loss.item() * len(grade)
-            all_surv_train.append(
-                [
-                    surv_pred.detach().cpu().numpy(),
-                    censored.cpu().numpy(),
-                    time.cpu().numpy(),
-                ]
-            )
-
             pbar.update(1)
             pbar.refresh()
 
         scheduler.step()
-        train_loss /= len(train_loader.dataset)
-        train_acc /= len(train_loader.dataset)
-        c_train = calc_cindex(all_surv_train)
-        test_loss, test_acc, _, test_cindx = evaluate(model, test_loader, opt)
+        train_loss, train_acc, _, c_train = evaluate(model, train_loader, opt)
+        test_loss, test_acc, _, c_test = evaluate(model, test_loader, opt)
 
-        pbar.set_description(
-            f"Epoch {epoch} | Loss: {train_loss:.2f}/{test_loss:.2f} | Acc: {train_acc:.2f}/{test_acc:.2f}, C-Index: {c_train:.2f}/{test_cindx:.2f}"
-        )
-        pbar.refresh()
+        desc = f"Epoch {epoch} (train/test) | Loss: {train_loss:.2f}/{test_loss:.2f} | "
+        desc += f"Acc: {train_acc:.2f}/{test_acc:.2f} | " if opt.task != "surv" else ""
+        desc += f"C-Index: {c_train:.2f}/{c_test:.2f} | " if opt.task != "grad" else ""
+        pbar.set_description(desc)
 
     metrics = []
     for loader, name in [(train_loader, "Train"), (test_loader, "Test")]:
@@ -73,36 +75,38 @@ def train(model, split_data, accelerator, opt, verbose=True):
 
 
 if __name__ == "__main__":
-    opt = parse_args()
+    opt, str_opt = parse_args()
     accelerator = Accelerator(cpu=True, step_scheduler_with_optimizer=False)
     device = accelerator.device
     print(f"Device: {device}")
+    opt.device = device
 
     split_data = get_splits(opt)
     metrics_list = []
 
     for i in range(1, opt.n_folds + 1):
         model = define_model(opt, i)
-        model, metrics = train(model, split_data[i], accelerator, opt, verbose=True)
-        print(
-            "\n",
-            tabulate(
-                metrics,
-                headers=[f"Split {i}", "Loss", "Accuracy", "AUC", "C-Index"],
-            ),
+        (
+            print(
+                "Trainable parameters:",
+                sum(p.numel() for p in model.parameters() if p.requires_grad),
+            )
+            if i == 1
+            else None
         )
+        model, metrics = train(model, split_data[i], accelerator, opt, verbose=True)
 
+        mtable = [[f"Split {i}", "Loss", "Accuracy", "AUC", "C-Index"], *metrics]
+        print(
+            tabulate(
+                mtable, headers="firstrow", tablefmt="rounded_grid", floatfmt=".3f"
+            )
+        )
         metrics_list.append(metrics[1][2:])
+        save_model(model, opt, i)
 
-    mean_std_metrics = [
-        ['Mean', *np.mean(metrics_list, axis=0)],
-        ['Std', *np.std(metrics_list, axis=0)]
-    ]
-
-    print(
-        "\n",
-        tabulate(
-            mean_std_metrics,
-            headers=["Accuracy", "AUC", "C-Index"],
-        ),
-    )
+    rtable = make_results_table(metrics_list, opt.n_folds)
+    print(rtable)
+    with open(f"checkpoints/{opt.task}/{opt.model}/results.txt", "w") as f:
+        f.write(str_opt + "\n")
+        f.write(rtable + "\n\n")

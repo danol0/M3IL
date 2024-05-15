@@ -1,16 +1,41 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import os
 from torch.nn import Parameter
 
-torch.autograd.set_detect_anomaly(True)
+
+# --- Utility ---
+def define_model(opt, k):
+    omic_dim = 320 if opt.use_rna else 80
+    if opt.model == "omic":
+        model = FFN(input_dim=omic_dim, omic_dim=32, dropout=opt.dropout)
+    elif opt.model == "qbt":
+        model = QBTNet(
+            k,
+            task=opt.task,
+            device=opt.device,
+            feature_dim=32,
+            n_queries=16,
+            batch_size=opt.batch_size,
+            transformer_layers=12,
+            dropout=opt.dropout,
+            omic_xdim=omic_dim,
+        )
+    else:
+        raise NotImplementedError(f"Model {opt.model} not implemented")
+    return model
 
 
-# Omics
-class MaxNet(nn.Module):
+def dfs_freeze(model, freeze=True):
+    for name, child in model.named_children():
+        for param in child.parameters():
+            param.requires_grad = not freeze
+        dfs_freeze(child)
+
+
+# --- Omics ---
+class FFN(nn.Module):
     def __init__(self, input_dim=80, omic_dim=32, dropout=0.25):
-        super(MaxNet, self).__init__()
+        super().__init__()
         hidden = [64, 48, 32, omic_dim]
 
         layers = []
@@ -40,11 +65,17 @@ class MaxNet(nn.Module):
 
         return features, grade, survival
 
+    def freeze(self, freeze=True):
+        dfs_freeze(self, freeze)
 
+
+# --- QBT ---
 class QBTNet(nn.Module):
     def __init__(
         self,
         k,
+        task,
+        device,
         feature_dim=32,
         n_queries=16,
         batch_size=32,
@@ -52,31 +83,30 @@ class QBTNet(nn.Module):
         dropout=0.25,
         omic_xdim=80,
     ):
-        super(QBTNet, self).__init__()
+        super().__init__()
         query_dim = feature_dim
+        n_heads = 4
 
         self.n = transformer_layers
         self.batch_size = batch_size
 
-        self.omic_net = MaxNet(
-            input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout
-        )
-        # pt_fname = '_%d.pt' % 1
-        # best_omic_ckpt = torch.load(os.path.join(opt.checkpoints_dir, opt.exp_name, 'omic', 'omic'+pt_fname), map_location=torch.device('cpu'))
-        # self.omic_net.load_state_dict(best_omic_ckpt['model_state_dict'])
+        self.omic_net = FFN(input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout)
+        best_omic_ckpt = torch.load(f"checkpoints/{task}/omic/omic_{k}.pt")
+        self.omic_net.load_state_dict(best_omic_ckpt["model"])
+        self.omic_net = self.omic_net.to(device)
 
         self.LN = nn.LayerNorm(feature_dim)
         self.correlation = nn.MultiheadAttention(
-            feature_dim, 4, dropout=dropout, batch_first=True
+            feature_dim, n_heads, dropout=dropout, batch_first=True
         )
 
-        self.query_omics_self_attention = [
-            nn.MultiheadAttention(query_dim, 4, dropout=dropout, batch_first=True)
+        self.query_omics_attention = [
+            nn.MultiheadAttention(query_dim, n_heads, dropout=dropout, batch_first=True)
             for _ in range(self.n)
         ]
 
-        self.cross_attention = [
-            nn.MultiheadAttention(query_dim, 4, dropout=dropout, batch_first=True)
+        self.query_path_attention = [
+            nn.MultiheadAttention(query_dim, n_heads, dropout=dropout, batch_first=True)
             for _ in range(self.n)
         ]
 
@@ -101,10 +131,12 @@ class QBTNet(nn.Module):
         self.LSM = nn.LogSoftmax(dim=1)
         self.sigmoid = nn.Sigmoid()
 
+        self.omic_net.freeze(True)
+
     def forward(self, **kwargs):
-        qs = self.Qs.repeat(self.batch_size, 1, 1)
 
         omic_embeddings = self.omic_net(**kwargs)[0].unsqueeze(1)  # batch x 1 x 32
+        qs = self.Qs.repeat(omic_embeddings.size(0), 1, 1)  # batch x 1 x 32
         image_embeddings = kwargs["x_path"]
         img_e_norm = self.LN(image_embeddings)  # batch x 9 x 32
         image_embeddings = (
@@ -112,10 +144,8 @@ class QBTNet(nn.Module):
         )
 
         for i in range(self.n):
-            qs = self.query_omics_self_attention[i](
-                qs, omic_embeddings, omic_embeddings
-            )[0]
-            qs = self.cross_attention[i](qs, image_embeddings, image_embeddings)[0]
+            qs = self.query_omics_attention[i](qs, omic_embeddings, omic_embeddings)[0]
+            qs = self.query_path_attention[i](qs, image_embeddings, image_embeddings)[0]
             qs = self.FFN[i](qs)
 
         # out = self.output_layer(qs).mean(dim=1)
