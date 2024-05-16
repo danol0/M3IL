@@ -2,11 +2,13 @@ import torch
 from accelerate import Accelerator
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from src.datasets import pathologyDataset, select_min, get_splits
+from src.datasets import define_dataset, get_splits, define_collate_fn
 from src.networks import define_model
 import numpy as np
 from src.options import parse_args
 from tabulate import tabulate
+import wandb
+import os
 from src.utils import (
     loss_fn,
     save_model,
@@ -14,6 +16,7 @@ from src.utils import (
     define_scheduler,
     make_results_table,
 )
+from line_profiler import profile
 
 # from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -21,13 +24,14 @@ torch.manual_seed(2019)
 np.random.seed(2019)
 
 
+@profile
 def train(model, split_data, accelerator, opt, verbose=True):
     train_loader, test_loader = (
         DataLoader(
-            pathologyDataset(split_data, s),
+            define_dataset(opt)(split_data, s, opt),
             batch_size=opt.batch_size,
             shuffle=True,
-            collate_fn=select_min,
+            collate_fn=define_collate_fn(opt),
         )
         for s in ["train", "test"]
     )
@@ -40,23 +44,26 @@ def train(model, split_data, accelerator, opt, verbose=True):
         model, train_loader, test_loader, optim, scheduler
     )
 
-    pbar = tqdm(total=len(train_loader), position=0, leave=True, disable=not verbose)
-    for epoch in range(opt.n_epochs):
-        pbar.reset()
+    pbar = tqdm(
+        range(opt.n_epochs),
+        total=opt.n_epochs,
+        position=0,
+        leave=True,
+        disable=not verbose,
+    )
+    for epoch in pbar:
         model.train()
 
         if epoch == 10 and opt.model == "qbt":
             model.omic_net.freeze(False)
 
-        for omics, path, event, time, grade, _ in train_loader:
+        for omic, path, graph, event, time, grade, _ in train_loader:
 
             optim.zero_grad()
-            _, grade_pred, surv_pred = model(x_omic=omics, x_path=path)
+            _, grade_pred, surv_pred = model(x_omic=omic, x_path=path, x_graph=graph)
             loss = loss_fn(model, grade, time, event, grade_pred, surv_pred, opt)
             accelerator.backward(loss)
             optim.step()
-            pbar.update(1)
-            pbar.refresh()
 
         scheduler.step()
         train_loss, train_acc, _, c_train = evaluate(model, train_loader, opt)
@@ -76,15 +83,22 @@ def train(model, split_data, accelerator, opt, verbose=True):
 
 if __name__ == "__main__":
     opt, str_opt = parse_args()
-    accelerator = Accelerator(cpu=True, step_scheduler_with_optimizer=False)
+    accelerator = Accelerator(cpu=True)
     device = accelerator.device
     print(f"Device: {device}")
     opt.device = device
+    os.environ["LINE_PROFILE"] = "1" if opt.dry_run else "0"
+    wandb.init(
+        mode="disabled" if opt.dry_run else "online",
+        project="mtpf",
+        config=opt,
+        name=f"{opt.task}_{opt.model}_{opt.mil}",
+    )
 
     split_data = get_splits(opt)
     metrics_list = []
 
-    for i in range(1, opt.n_folds + 1):
+    for i in range(1, opt.folds + 1):
         model = define_model(opt, i)
         (
             print(
@@ -103,10 +117,14 @@ if __name__ == "__main__":
             )
         )
         metrics_list.append(metrics[1][2:])
-        save_model(model, opt, i)
+        save_model(model, opt, i) if not opt.dry_run else None
 
-    rtable = make_results_table(metrics_list, opt.n_folds)
+    rtable = make_results_table(metrics_list, opt.folds)
     print(rtable)
-    with open(f"checkpoints/{opt.task}/{opt.model}/results.txt", "w") as f:
-        f.write(str_opt + "\n")
-        f.write(rtable + "\n\n")
+    if not opt.dry_run:
+        with open(
+            f"checkpoints/{opt.task}/{opt.model}_{opt.mil}/results.txt", "w"
+        ) as f:
+            f.write(str_opt + "\n")
+            f.write(rtable + "\n\n")
+        print(f"Results saved to checkpoints/{opt.task}/{opt.model}_{opt.mil}")

@@ -5,43 +5,128 @@ import pandas as pd
 import pickle
 from sklearn.preprocessing import StandardScaler
 from collections import defaultdict
+import os
+from torch_geometric.data import Batch
+
+
+def define_dataset(opt):
+    if opt.mil == "instance":
+        return instanceLevelDataset
+    elif opt.mil == "pat":
+        return patientLevelDataset
+    else:
+        raise NotImplementedError(f"MIL type {opt.mil} not implemented")
 
 
 # --- Dataset Class ---
-class pathologyDataset(Dataset):
-    def __init__(self, data, split):
+class instanceLevelDataset(Dataset):
+    """Defines a multimodal pathology dataset of instance level combinations."""
+
+    def __init__(self, data, split, opt):
+        self.mode = opt.model
+        self.data = data[split]
+
+        combinations = []
+        for pat in self.data.keys():
+            num_path = self.data[pat]["x_path"].shape[0] if "path" in self.mode else 1
+            num_graph = len(self.data[pat]["x_graph"]) if "graph" in self.mode else 1
+            combinations.extend(
+                [(pat, i, j) for i in range(num_path) for j in range(num_graph)]
+            )
+
+        self.combinations = combinations
+
+    def __getitem__(self, idx):
+        pat, i, j = self.combinations[idx]
+
+        omic, path, graph = torch.tensor([0]), torch.tensor([0]), torch.tensor([0])
+
+        if "omic" in self.mode:
+            omic = torch.tensor(self.data[pat]["x_omic"], dtype=torch.float32)
+
+        if "path" in self.mode:
+            path = torch.tensor(
+                self.data[pat]["x_path"][i], dtype=torch.float32
+            ).squeeze(0)
+
+        if "graph" in self.mode:
+            graph = [torch.load(self.data[pat]["x_graph"][j])]
+            graph = Batch.from_data_list(graph)
+
+        event, time, grade = [
+            torch.tensor(self.data[pat]["y"][k], dtype=torch.long) for k in range(3)
+        ]
+
+        return (omic, path, graph, event, time, grade, pat)
+
+    def __len__(self):
+        return len(self.combinations)
+
+
+class patientLevelDataset(Dataset):
+    """Defines a multimodal pathology dataset bagged at the patient level."""
+
+    def __init__(self, data, split, opt):
+        self.mode = opt.model
         self.data = data[split]
         self.patnames = list(self.data.keys())
 
     def __getitem__(self, idx):
         pname = self.patnames[idx]
-        omics = torch.tensor(self.data[pname]["x_omic"]).type(torch.FloatTensor)
+        # Empty tensors are compatible with downstream operations
+        omic, path, graph = torch.tensor([0]), torch.tensor([0]), torch.tensor([0])
 
-        imgs = self.data[pname]["x_path"]
-        imgs = torch.tensor(imgs).type(torch.FloatTensor).squeeze(1)
+        if "omic" in self.mode:
+            omic = torch.tensor(self.data[pname]["x_omic"], dtype=torch.float32)
+
+        if "path" in self.mode:
+            path = self.data[pname]["x_path"]
+            path = torch.tensor(path, dtype=torch.float32).squeeze(1)
+
+        if "graph" in self.mode:
+            graph = [torch.load(g) for g in self.data[pname]["x_graph"]]
+            graph = Batch.from_data_list(graph)
 
         event, time, grade = [
-            torch.tensor(self.data[pname]["y"][i]).type(torch.LongTensor)
-            for i in range(3)
+            torch.tensor(self.data[pname]["y"][i], dtype=torch.long) for i in range(3)
         ]
-        return (omics, imgs, event, time, grade, pname)
+        return (omic, path, graph, event, time, grade, pname)
 
     def __len__(self):
         return len(self.patnames)
 
 
 # --- Collate functions ---
+def define_collate_fn(opt):
+    if opt.collate == "min":
+        return select_min
+    elif opt.collate == "pad":
+        return pad2max
+    else:
+        raise NotImplementedError(f"Collate function {opt.collate} not implemented")
+
+
+def prepare_graph_batch(graph):
+    n_graphs = torch.Tensor([0])
+    if not isinstance(graph[0], torch.Tensor):
+        n_graphs = torch.Tensor([len(g.ptr) - 1 for g in graph]).long()
+        graph = Batch.from_data_list(graph)
+    return graph, n_graphs
+
+
 def select_min(batch):
-    omics, imgs, event, time, grade, pname = zip(*batch)
+    omic, path, graph, event, time, grade, pname = zip(*batch)
 
     # find minimum number of images
-    min_imgs = min([img.size(0) for img in imgs])
-    # select min_imgs random images
-    idxs = np.random.choice(min_imgs, 9, replace=False)
-    imgs = [img[idxs] for img in imgs]
+    if len(path) > 1:
+        min_imgs = min([img.size(0) for img in path])
+        # select min_imgs random images from each patient
+        path = [img[torch.randperm(img.size(0))[:min_imgs]] for img in path]
+
     return (
-        torch.stack(omics),
-        torch.stack(imgs),
+        torch.stack(omic),
+        torch.stack(path),
+        prepare_graph_batch(graph),
         torch.stack(event),
         torch.stack(time),
         torch.stack(grade),
@@ -50,21 +135,24 @@ def select_min(batch):
 
 
 def pad2max(batch):
-    omics, imgs, event, time, grade = zip(*batch)
+    omic, path, graph, event, time, grade, pname = zip(*batch)
 
     # find max number of images
-    max_imgs = max([img.size(0) for img in imgs])
+    max_imgs = max([img.size(0) for img in path])
     # 0 pad
-    imgs = [
+    path = [
         torch.cat([img, img.new_zeros(max_imgs - img.size(0), *img.size()[1:])])
-        for img in imgs
+        for img in path
     ]
+
     return (
-        torch.stack(omics),
-        torch.stack(imgs),
+        torch.stack(omic),
+        torch.stack(path),
+        prepare_graph_batch(graph),
         torch.stack(event),
         torch.stack(time),
         torch.stack(grade),
+        pname,
     )
 
 
@@ -80,18 +168,24 @@ def get_splits(opt, data_dir="./data"):
 
     vgg_ftype = "surv" if opt.task == "multi" else opt.task
     vgg_feats = pickle.load(open(f"{data_dir}/vgg_features_{vgg_ftype}.pkl", "rb"))
-    pat2img = defaultdict(list)
-    for img_fname in vgg_feats.keys():
-        pat2img[img_fname[:12]].append(img_fname)
 
-    for k in range(1, opt.n_folds + 1):
+    pat2roi = defaultdict(list)
+    for roi_fname in os.listdir(f"{data_dir}/graphs/"):
+        pat2roi[roi_fname[:12]].append(roi_fname.rstrip(".pt"))
+
+    pat2patch = defaultdict(list)
+    for img_fname in vgg_feats.keys():
+        pat2patch[img_fname[:12]].append(img_fname)
+
+    for k in range(1, opt.folds + 1):
         split_data[k] = {
             split: {
                 pat: {
                     "x_omic": dataset.loc[pat].drop(metadata).values.astype(np.float32),
                     "x_path": np.stack(
-                        [vgg_feats[img_fname] for img_fname in pat2img[pat]]
+                        [vgg_feats[img_fname] for img_fname in pat2patch[pat]]
                     ),
+                    "x_graph": [f"{data_dir}/graphs/{roi}.pt" for roi in pat2roi[pat]],
                     "y": [
                         dataset.loc[pat]["Event"],
                         dataset.loc[pat]["Survival months"],
@@ -229,7 +323,7 @@ def getCleanAllDataset(data_dir="./data/omics", use_rnaseq=False):
 # #        1. keys are the split number (0-15)
 # #        2. values are dicts with keys 'train', 'test'
 # #        3. values of 'train' and 'test' are dicts with keys 'x_patname', 'x_path', 'x_grph', 'x_omic', 'e', 't', 'g'
-# class PathgraphpathologyDataset(Dataset):
+# class PathgraphpatientLevelDataset(Dataset):
 #     def __init__(self, opt, data, split):
 #         '''
 #         Args:
