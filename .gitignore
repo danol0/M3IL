@@ -2,6 +2,8 @@ trainold.py
 data/*
 *.pyc
 *.ipynb
-checkpoints/*
+checkpoints*
 *.txt
 *.lprof
+wandb/*
+.vscode/*

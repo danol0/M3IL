@@ -7,6 +7,7 @@ from sklearn.preprocessing import StandardScaler
 from collections import defaultdict
 import os
 from torch_geometric.data import Batch
+from torch.utils.data.dataloader import default_collate
 
 
 def define_dataset(opt):
@@ -19,6 +20,13 @@ def define_dataset(opt):
 
 
 # --- Dataset Class ---
+# TODO: Implement paperDataset
+# class paperDataset(Dataset):
+#     """Defines the dataset as used in the paper.
+
+#     The key difference is that patches can only be paired with the graph from their ROI."""
+
+
 class instanceLevelDataset(Dataset):
     """Defines a multimodal pathology dataset of instance level combinations."""
 
@@ -98,12 +106,15 @@ class patientLevelDataset(Dataset):
 
 # --- Collate functions ---
 def define_collate_fn(opt):
-    if opt.collate == "min":
-        return select_min
-    elif opt.collate == "pad":
-        return pad2max
+    if opt.mil in ("instance", "paper"):
+        return default_collate
     else:
-        raise NotImplementedError(f"Collate function {opt.collate} not implemented")
+        if opt.collate == "min":
+            return select_min
+        elif opt.collate == "pad":
+            return pad2max
+        else:
+            raise NotImplementedError(f"Collate function {opt.collate} not implemented")
 
 
 def prepare_graph_batch(graph):
@@ -158,7 +169,7 @@ def pad2max(batch):
 
 # --- Data loading ---
 def get_splits(opt, data_dir="./data"):
-    metadata, dataset = getCleanAllDataset(use_rnaseq=opt.use_rna)
+    metadata, dataset = getCleanAllDataset(use_rnaseq=opt.rna)
     split_data = {}
 
     pnas_splits = pd.read_csv(f"{data_dir}/splits/pnas_splits.csv")

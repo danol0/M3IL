@@ -4,29 +4,28 @@ from torch.nn import Parameter
 from torch_geometric.nn import SAGEConv, SAGPooling
 from torch.nn import functional as F
 from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
+from src.fusion import define_bifusion
 
 
 # --- Utility ---
-def define_model(opt, k):
-    omic_dim = 320 if opt.use_rna else 80
+def define_model(opt):
+    omic_dim = 320 if opt.rna else 80
     if opt.model == "omic":
         model = FFN(input_dim=omic_dim, omic_dim=32, dropout=opt.dropout)
     elif opt.model == "pathomic_qbt":
         model = QBTNet(
-            k,
-            task=opt.task,
-            device=opt.device,
+            opt,
             feature_dim=32,
             n_queries=16,
-            batch_size=opt.batch_size,
             transformer_layers=12,
-            dropout=opt.dropout,
             omic_xdim=omic_dim,
         )
     elif opt.model == "graph":
-        model = GraphNet(
-            features=1036, nhid=128, graph_dim=32, dropout_rate=opt.dropout
-        )
+        model = GraphNet(dropout_rate=opt.dropout)
+    elif opt.model == "pathomic":
+        model = PathomicNet(opt, omic_xdim=omic_dim, feature_dim=32)
+    elif opt.model == "graphomic":
+        model = GraphomicNet(opt, omic_xdim=omic_dim)
     else:
         raise NotImplementedError(f"Model {opt.model} not implemented")
     return model
@@ -39,21 +38,23 @@ def dfs_freeze(model, freeze=True):
         dfs_freeze(child)
 
 
-# --- Omics ---
+# --- Omic ---
 class FFN(nn.Module):
-    def __init__(self, input_dim=80, omic_dim=32, dropout=0.25):
+    def __init__(self, input_dim=80, omic_dim=32, dropout=0.25, dropout_layer=0):
         super().__init__()
-        hidden = [64, 48, 32, omic_dim] if input_dim == 80 else [128, 64, 48, omic_dim]
+        hidden = [64, 48, 32, omic_dim]
+        # if input_dim == 80 else [128, 64, 48, omic_dim]
 
         layers = []
         for i in range(len(hidden)):
             layers.append(nn.Linear(input_dim if i == 0 else hidden[i - 1], hidden[i]))
             layers.append(nn.ELU())
-            layers.append(nn.AlphaDropout(p=dropout, inplace=False))
+            if i >= dropout_layer:
+                layers.append(nn.AlphaDropout(p=dropout, inplace=False))
 
         self.encoder = nn.Sequential(*layers)
         self.grade_clf = nn.Sequential(nn.Linear(omic_dim, 3), nn.LogSoftmax(dim=1))
-        self.survival_clf = nn.Sequential(nn.Linear(omic_dim, 1), nn.Sigmoid())
+        self.hazard_clf = nn.Sequential(nn.Linear(omic_dim, 1), nn.Sigmoid())
 
         self.register_buffer("output_range", torch.FloatTensor([6]))
         self.register_buffer("output_shift", torch.FloatTensor([-3]))
@@ -62,31 +63,20 @@ class FFN(nn.Module):
         x = kwargs["x_omic"]
         features = self.encoder(x)
         grade = self.grade_clf(features)
-        survival = self.survival_clf(features) * self.output_range + self.output_shift
-
-        return features, grade, survival
+        hazard = self.hazard_clf(features) * self.output_range + self.output_shift
+        return features, grade, hazard
 
     def freeze(self, freeze=True):
         dfs_freeze(self, freeze)
 
 
 # --- Graph ---
-class NormalizeFeaturesV2(object):
-    r"""Column-normalizes node features to sum-up to one."""
+class NormalizeGraphs(object):
+    r"""Column-normalises nodes and edges to sum to 1."""
 
     def __call__(self, data):
         data.x[:, :12] = data.x[:, :12] / data.x[:, :12].max(0, keepdim=True)[0]
         data.x = data.x.type(torch.FloatTensor)
-        return data
-
-    def __repr__(self):
-        return "{}()".format(self.__class__.__name__)
-
-
-class NormalizeEdgesV2(object):
-    r"""Column-normalizes node features to sum-up to one."""
-
-    def __call__(self, data):
         data.edge_attr = data.edge_attr.type(torch.FloatTensor)
         data.edge_attr = data.edge_attr / data.edge_attr.max(0, keepdim=True)[0]
         return data
@@ -96,8 +86,12 @@ class NormalizeEdgesV2(object):
 
 
 class GraphNet(torch.nn.Module):
-    def __init__(self, features=1036, nhid=128, graph_dim=32, dropout_rate=0.25):
+    def __init__(self, dropout_rate=0.25):
         super().__init__()
+
+        features = 1036
+        nhid = 128
+        graph_dim = 32
 
         hidden = [features, nhid, nhid]
 
@@ -115,15 +109,14 @@ class GraphNet(torch.nn.Module):
         self.lin2 = torch.nn.Linear(nhid, graph_dim)
 
         self.grade_clf = nn.Sequential(nn.Linear(graph_dim, 3), nn.LogSoftmax(dim=1))
-        self.survival_clf = nn.Sequential(nn.Linear(graph_dim, 1), nn.Sigmoid())
+        self.hazard_clf = nn.Sequential(nn.Linear(graph_dim, 1), nn.Sigmoid())
 
         self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
         self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
 
     def forward(self, **kwargs):
         data, graphs_per_pat = kwargs["x_graph"]
-        data = NormalizeFeaturesV2()(data)
-        data = NormalizeEdgesV2()(data)
+        data = NormalizeGraphs()(data)
         x, edge_index, edge_attr, batch = (
             data.x,
             data.edge_index,
@@ -142,11 +135,13 @@ class GraphNet(torch.nn.Module):
         x = torch.sum(torch.stack(xs), dim=0)
 
         # x is now a tensor of shape [num_graphs, 2 * nhid]
+        # For bagged MIL, each graph is itself a batch of graphs belonging to the patient
         # We want to pool the graph features belonging to the same patient
         patient_indices = torch.arange(len(graphs_per_pat))
         batch_vector = torch.repeat_interleave(patient_indices, graphs_per_pat)
 
         # Now we can use the batch vector to pool the graphs
+        # For instance level MIL, this will do nothing
         x = gap(x, batch_vector)
 
         x = F.relu(self.lin1(x))
@@ -156,48 +151,116 @@ class GraphNet(torch.nn.Module):
         features = F.relu(self.lin2(x))
 
         grade = self.grade_clf(features)
-        survival = self.survival_clf(features) * self.output_range + self.output_shift
+        hazard = self.hazard_clf(features) * self.output_range + self.output_shift
 
-        return features, grade, survival
+        return features, grade, hazard
+
+    def freeze(self, freeze=True):
+        dfs_freeze(self, freeze)
 
 
-# def aggregrate(batch_vector, tensor, agg_type="mean"):
-#     unique_patients = torch.unique(batch_vector)
-#     if agg_type == "sum":
-#         return torch.stack([tensor[batch_vector == patient].sum(dim=0) for patient in unique_patients])
-#     elif agg_type == "mean":
-#         return torch.stack([tensor[batch_vector == patient].mean(dim=0) for patient in unique_patients])
-#     elif agg_type == "max":
-#         return torch.stack([tensor[batch_vector == patient].max(dim=0).values for patient in unique_patients])
-#     else:
-#         raise ValueError(f"Unknown aggregation type {agg_type}")
+# --- FUSION ---
+class PathomicNet(nn.Module):
+    def __init__(self, opt, omic_xdim=80, feature_dim=32):
+        super().__init__()
+        mmhid = 64
+        dropout = opt.dropout
+        # TODO: experiment with reduced dropout layers
+        self.omic_net = FFN(
+            input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
+        )
+        rna = "_rna" if opt.rna else ""
+        ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        self.omic_net.load_state_dict(ckpt["model"])
+        self.omic_net = self.omic_net.to(opt.device)
+
+        # TODO: learned/flexible aggregation
+        self.bagged = 1 if opt.mil == "pat" else 0
+
+        self.fusion = define_bifusion(opt)
+        self.grade_clf = nn.Sequential(nn.Linear(mmhid, 3), nn.LogSoftmax(dim=1))
+        self.hazard_clf = nn.Sequential(nn.Linear(mmhid, 1), nn.Sigmoid())
+
+        self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
+        self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
+
+        self.omic_net.freeze(True)
+
+    def forward(self, **kwargs):
+        path_vec = kwargs["x_path"]
+        if self.bagged:
+            path_vec = path_vec.sum(dim=1)
+        omic_vec, _, _ = self.omic_net(x_omic=kwargs["x_omic"])
+        features = self.fusion(path_vec, omic_vec)
+        grade = self.grade_clf(features)
+        hazard = self.hazard_clf(features) * self.output_range + self.output_shift
+
+        return features, grade, hazard
+
+
+class GraphomicNet(nn.Module):
+    def __init__(self, opt, omic_xdim=80):
+        super().__init__()
+        dropout = opt.dropout
+        feature_dim = 32
+        self.grph_net = GraphNet(dropout_rate=opt.dropout)
+        self.omic_net = FFN(
+            input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
+        )
+
+        rna = "_rna" if opt.rna else ""
+        omic_ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        self.omic_net.load_state_dict(omic_ckpt["model"])
+        self.omic_net = self.omic_net.to(opt.device)
+        grph_ckpt = torch.load(f"checkpoints/{opt.task}/graph/graph_{opt.k}.pt")
+        self.grph_net.load_state_dict(grph_ckpt["model"])
+        self.grph_net = self.grph_net.to(opt.device)
+
+        self.fusion = define_bifusion(opt)
+        self.grade_clf = nn.Sequential(nn.Linear(feature_dim, 3), nn.LogSoftmax(dim=1))
+        self.hazard_clf = nn.Sequential(nn.Linear(feature_dim, 1), nn.Sigmoid())
+
+        self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
+        self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
+
+        self.omic_net.freeze(True)
+        self.grph_net.freeze(True)
+
+    def forward(self, **kwargs):
+        grph_vec, _ = self.grph_net(x_grph=kwargs["x_grph"])
+        omic_vec, _ = self.omic_net(x_omic=kwargs["x_omic"])
+        features = self.fusion(grph_vec, omic_vec)
+        grade = self.grade_clf(features)
+        hazard = self.hazard_clf(features) * self.output_range + self.output_shift
+
+        return features, grade, hazard
 
 
 # --- QBT ---
 class QBTNet(nn.Module):
     def __init__(
         self,
-        k,
-        task,
-        device,
+        opt,
         feature_dim=32,
         n_queries=16,
-        batch_size=32,
         transformer_layers=12,
-        dropout=0.25,
         omic_xdim=80,
     ):
         super().__init__()
         query_dim = feature_dim
         n_heads = 4
+        dropout = opt.dropout
 
         self.n = transformer_layers
-        self.batch_size = batch_size
+        self.batch_size = opt.batch_size
 
-        self.omic_net = FFN(input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout)
-        best_omic_ckpt = torch.load(f"checkpoints/{task}/omic/omic_{k}.pt")
-        self.omic_net.load_state_dict(best_omic_ckpt["model"])
-        self.omic_net = self.omic_net.to(device)
+        self.omic_net = FFN(
+            input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=2
+        )
+        rna = "_rna" if opt.rna else ""
+        ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        self.omic_net.load_state_dict(ckpt["model"])
+        self.omic_net = self.omic_net.to(opt.device)
 
         self.LN = nn.LayerNorm(feature_dim)
         self.correlation = nn.MultiheadAttention(
@@ -227,7 +290,7 @@ class QBTNet(nn.Module):
         self.Qs = Parameter(torch.randn(n_queries, query_dim), requires_grad=True)
 
         self.grade_clf = nn.Sequential(nn.Linear(feature_dim, 3), nn.LogSoftmax(dim=1))
-        self.survival_clf = nn.Sequential(nn.Linear(feature_dim, 1), nn.Sigmoid())
+        self.hazard_clf = nn.Sequential(nn.Linear(feature_dim, 1), nn.Sigmoid())
 
         self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
         self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
@@ -251,13 +314,13 @@ class QBTNet(nn.Module):
 
         features = qs.mean(dim=1)  # TODO: sum or mean
         grade = self.grade_clf(features)
-        survival = self.survival_clf(features) * self.output_range + self.output_shift
-        return features, grade, survival
+        hazard = self.hazard_clf(features) * self.output_range + self.output_shift
+        return features, grade, hazard
 
         # TODO: compare these differences
         # grade = self.LSM(self.grade_clf(qs).mean(dim=1))
-        # survival = (
-        #     self.sigmoid(self.survival_clf(qs).mean(dim=1)) * self.output_range
+        # hazard = (
+        #     self.sigmoid(self.hazard_clf(qs).mean(dim=1)) * self.output_range
         #     + self.output_shift
         # )
-        # return 0, grade, survival
+        # return 0, grade, hazard
