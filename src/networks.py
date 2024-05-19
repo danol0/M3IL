@@ -111,8 +111,8 @@ class GraphNet(torch.nn.Module):
         self.grade_clf = nn.Sequential(nn.Linear(graph_dim, 3), nn.LogSoftmax(dim=1))
         self.hazard_clf = nn.Sequential(nn.Linear(graph_dim, 1), nn.Sigmoid())
 
-        self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
-        self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
+        self.register_buffer("output_range", torch.FloatTensor([6]))
+        self.register_buffer("output_shift", torch.FloatTensor([-3]))
 
     def forward(self, **kwargs):
         data, graphs_per_pat = kwargs["x_graph"]
@@ -181,8 +181,8 @@ class PathomicNet(nn.Module):
         self.grade_clf = nn.Sequential(nn.Linear(mmhid, 3), nn.LogSoftmax(dim=1))
         self.hazard_clf = nn.Sequential(nn.Linear(mmhid, 1), nn.Sigmoid())
 
-        self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
-        self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
+        self.register_buffer("output_range", torch.FloatTensor([6]))
+        self.register_buffer("output_shift", torch.FloatTensor([-3]))
 
         self.omic_net.freeze(True)
 
@@ -220,8 +220,8 @@ class GraphomicNet(nn.Module):
         self.grade_clf = nn.Sequential(nn.Linear(feature_dim, 3), nn.LogSoftmax(dim=1))
         self.hazard_clf = nn.Sequential(nn.Linear(feature_dim, 1), nn.Sigmoid())
 
-        self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
-        self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
+        self.register_buffer("output_range", torch.FloatTensor([6]))
+        self.register_buffer("output_shift", torch.FloatTensor([-3]))
 
         self.omic_net.freeze(True)
         self.grph_net.freeze(True)
@@ -292,8 +292,8 @@ class QBTNet(nn.Module):
         self.grade_clf = nn.Sequential(nn.Linear(feature_dim, 3), nn.LogSoftmax(dim=1))
         self.hazard_clf = nn.Sequential(nn.Linear(feature_dim, 1), nn.Sigmoid())
 
-        self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
-        self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
+        self.register_buffer("output_range", torch.FloatTensor([6]))
+        self.register_buffer("output_shift", torch.FloatTensor([-3]))
 
         self.omic_net.freeze(True)
 

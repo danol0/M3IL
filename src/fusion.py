@@ -113,9 +113,7 @@ class BilinearFusion(nn.Module):
         o2 = torch.cat(
             (o2, torch.FloatTensor(o2.shape[0], 1).fill_(1).to(self.device)), 1
         )
-        o12 = torch.bmm(o1.unsqueeze(2), o2.unsqueeze(1)).flatten(
-            start_dim=1
-        )  # BATCH_SIZE X 1024
+        o12 = torch.bmm(o1.unsqueeze(2), o2.unsqueeze(1)).flatten(start_dim=1)
         out = self.post_fusion_dropout(o12)
         out = self.encoder1(out)
         out = self.encoder2(out)

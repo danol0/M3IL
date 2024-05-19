@@ -115,8 +115,8 @@ def evaluate(model, data_loader, opt, precomp=None, return_preds=False):
     all_preds = get_all_preds(model, data_loader) if precomp is None else precomp
 
     # If instance level MIL, aggregate predictions by patient
-    if opt.mil == "instance":
-        # Group by 'patname' and calculate aggregations
+    if opt.mil in ("instance", "paper"):
+        # aggregrate by patient
         all_preds = all_preds.groupby("patname").agg(
             {
                 "grade_p_0": "max",
@@ -198,12 +198,16 @@ def CoxLoss(survtime, event, hazard_pred):
 
 
 def l1_reg(model):
-    return sum(torch.abs(W).sum() for W in model.parameters())
+    # We only regularise the omic_net
+    if hasattr(model, "omic_net"):
+        return sum(torch.abs(W).sum() for W in model.omic_net.parameters())
+    else:
+        return sum(torch.abs(W).sum() for W in model.parameters())
 
 
 def define_scheduler(opt, optimizer):
     def lambda_rule(epoch):
-        lr_l = 1.0 - epoch / float(opt.n_epochs)
+        lr_l = 1.0 - max(0, epoch - opt.lr_fix) / float(opt.n_epochs - opt.lr_fix)
         return lr_l
 
     return lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_rule)

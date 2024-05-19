@@ -13,6 +13,7 @@ from src.datasets import define_dataset, get_splits, define_collate_fn
 from src.networks import define_model
 from src.options import parse_args
 import src.utils as utls
+
 # from line_profiler import profile
 # from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -30,9 +31,10 @@ def train(model, split_data, accelerator, opt):
         )
         for s in ["train", "test"]
     )
+    print(f"{len(train_loader.dataset)} train samples")
 
     optim = torch.optim.Adam(
-        model.parameters(), betas=(0.9, 0.999), lr=opt.lr, weight_decay=opt.l2
+        model.parameters(), betas=(opt.adam_b1, 0.999), lr=opt.lr, weight_decay=opt.l2
     )
     scheduler = utls.define_scheduler(opt, optim)
     model, train_loader, test_loader, optim, scheduler = accelerator.prepare(
@@ -46,8 +48,12 @@ def train(model, split_data, accelerator, opt):
         train_loss = 0
         all_preds = utls.make_empty_data_dict()
 
-        if epoch == 5 and opt.model in ("pathomic_qbt", "pathomic"):
-            model.omic_net.freeze(False)
+        if epoch == 5:
+            if opt.model in ("pathomic_qbt", "pathomic"):
+                model.omic_net.freeze(False)
+            if opt.model in ("graphomic", ""):
+                model.omic_net.freeze(False)
+                model.graph_net.freeze(False)
 
         for omic, path, graph, event, time, grade, patname in train_loader:
             # --- Forward pass ---
@@ -107,6 +113,7 @@ if __name__ == "__main__":
     else:
         opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}_{opt.mil}"
         group = f"{opt.task}_{opt.model}{rna}_{opt.mil}"
+    print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
     for k in range(1, opt.folds + 1):
         opt.k = k
         wandb.init(

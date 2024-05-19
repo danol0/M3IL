@@ -11,7 +11,7 @@ from torch.utils.data.dataloader import default_collate
 
 
 def define_dataset(opt):
-    if opt.mil == "instance":
+    if opt.mil in ("instance", "paper"):
         return instanceLevelDataset
     elif opt.mil == "pat":
         return patientLevelDataset
@@ -21,10 +21,6 @@ def define_dataset(opt):
 
 # --- Dataset Class ---
 # TODO: Implement paperDataset
-# class paperDataset(Dataset):
-#     """Defines the dataset as used in the paper.
-
-#     The key difference is that patches can only be paired with the graph from their ROI."""
 
 
 class instanceLevelDataset(Dataset):
@@ -38,10 +34,12 @@ class instanceLevelDataset(Dataset):
         for pat in self.data.keys():
             num_path = self.data[pat]["x_path"].shape[0] if "path" in self.mode else 1
             num_graph = len(self.data[pat]["x_graph"]) if "graph" in self.mode else 1
+            if opt.mil == "paper" and "pathgraph" in self.mode:
+                assert num_path == num_graph * 9
+                combinations.extend([(pat, i, i // 9) for i in range(num_path)])
             combinations.extend(
                 [(pat, i, j) for i in range(num_path) for j in range(num_graph)]
             )
-
         self.combinations = combinations
 
     def __getitem__(self, idx):
@@ -169,7 +167,11 @@ def pad2max(batch):
 
 # --- Data loading ---
 def get_splits(opt, data_dir="./data"):
-    metadata, dataset = getCleanAllDataset(use_rnaseq=opt.rna)
+    rmomics = 1 if "omic" in opt.model else 0
+    rmgrade = 1 if opt.task in ["multi", "grad"] else 0
+    labels, dataset = getCleanAllDataset(
+        use_rnaseq=opt.rna, rm_missing_omics=rmomics, rm_missing_grade=rmgrade
+    )
     split_data = {}
 
     pnas_splits = pd.read_csv(f"{data_dir}/splits/pnas_splits.csv")
@@ -181,20 +183,26 @@ def get_splits(opt, data_dir="./data"):
     vgg_feats = pickle.load(open(f"{data_dir}/vgg_features_{vgg_ftype}.pkl", "rb"))
 
     pat2roi = defaultdict(list)
+    roi2patch = defaultdict(list)
     for roi_fname in os.listdir(f"{data_dir}/graphs/"):
         pat2roi[roi_fname[:12]].append(roi_fname.rstrip(".pt"))
-
-    pat2patch = defaultdict(list)
-    for img_fname in vgg_feats.keys():
-        pat2patch[img_fname[:12]].append(img_fname)
+        # We do this with nested loops to preserve the order of the patches
+        # This allows us to match the patches to parent graphs as done in the paper
+        for img_fname in vgg_feats.keys():
+            if img_fname.startswith(roi_fname.rstrip(".pt")):
+                roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
 
     for k in range(1, opt.folds + 1):
         split_data[k] = {
             split: {
                 pat: {
-                    "x_omic": dataset.loc[pat].drop(metadata).values.astype(np.float32),
+                    "x_omic": dataset.loc[pat].drop(labels).values.astype(np.float32),
                     "x_path": np.stack(
-                        [vgg_feats[img_fname] for img_fname in pat2patch[pat]]
+                        [
+                            vgg_feats[patch]
+                            for roi in pat2roi[pat]
+                            for patch in roi2patch[roi]
+                        ]
                     ),
                     "x_graph": [f"{data_dir}/graphs/{roi}.pt" for roi in pat2roi[pat]],
                     "y": [
@@ -225,11 +233,14 @@ def get_splits(opt, data_dir="./data"):
 
 
 # TODO: allow for different moltype ignore etc
-def getCleanAllDataset(data_dir="./data/omics", use_rnaseq=False):
-    metadata = [
-        "Histology",
+def getCleanAllDataset(
+    data_dir="./data/omics",
+    use_rnaseq=False,
+    rm_missing_omics=True,
+    rm_missing_grade=True,
+):
+    labels = [
         "Grade",
-        "Molecular subtype",
         "censored",
         "Survival months",
         "Event",
@@ -239,9 +250,7 @@ def getCleanAllDataset(data_dir="./data/omics", use_rnaseq=False):
     all_dataset.set_index("TCGA ID", inplace=True)
 
     all_grade = pd.read_csv(f"{data_dir}/grade_data.csv")
-    all_grade["Histology"] = all_grade["Histology"].str.replace(
-        "astrocytoma (glioblastoma)", "glioblastoma", regex=False
-    )
+
     all_grade.set_index("TCGA ID", inplace=True)
 
     assert pd.Series(all_dataset.index).equals(pd.Series(sorted(all_grade.index)))
@@ -251,6 +260,7 @@ def getCleanAllDataset(data_dir="./data/omics", use_rnaseq=False):
         on="TCGA ID",
     )
 
+    all_dataset = all_dataset.drop(["Histology", "Molecular subtype"], axis=1)
     all_dataset["Grade"] = all_dataset["Grade"] - 2
     all_dataset["Event"] = 1 - all_dataset["censored"]
 
@@ -278,113 +288,30 @@ def getCleanAllDataset(data_dir="./data/omics", use_rnaseq=False):
         glioma_RNAseq.index.name = "TCGA ID"
         all_dataset = all_dataset.join(glioma_RNAseq, how="inner")
 
-    # Drop patients with missing data
-    pat_missing_moltype = all_dataset[all_dataset["Molecular subtype"].isna()].index
-    pat_missing_idh = all_dataset[all_dataset["idh mutation"].isna()].index
-    pat_missing_1p19q = all_dataset[all_dataset["codeletion"].isna()].index
-    assert pat_missing_moltype.equals(pat_missing_idh)
-    assert pat_missing_moltype.equals(pat_missing_1p19q)
-    all_dataset = all_dataset.drop(pat_missing_moltype)
-    pat_missing_grade = all_dataset[all_dataset["Grade"].isna()].index
-    pat_missing_histype = all_dataset[all_dataset["Histology"].isna()].index
-    assert pat_missing_histype.equals(pat_missing_grade)
-    all_dataset = all_dataset.drop(pat_missing_histype)
+    # Impute or remove missing data
+    if rm_missing_grade:
+        print(
+            f"Removing {all_dataset['Grade'].isna().sum()} patients with missing grade"
+        )
+        all_dataset = all_dataset[all_dataset["Grade"].notna()]
+    else:
+        print(f"Imputing {all_dataset['Grade'].isna().sum()} missing grades with 1")
+        all_dataset["Grade"] = all_dataset["Grade"].fillna(1)
 
-    # 3 patients have no omics data: we remove them
-    missing = all_dataset.drop(metadata, axis=1).isna().any(axis=1)
-    print(f"Removing {missing.sum()} patients with missing omics data")
-    all_dataset = all_dataset[~missing]
+    if rm_missing_omics:
+        print(
+            f"Removing {all_dataset.isna().any(axis=1).sum()} patients with missing omics"
+        )
+        all_dataset = all_dataset[all_dataset.notna().all(axis=1)]
+    else:
+        print(
+            f"Imputing missing omics with median in {all_dataset.isna().any(axis=1).sum()} patients"
+        )
+        for col in all_dataset.drop(labels, axis=1).columns:
+            all_dataset[col] = all_dataset[col].fillna(all_dataset[col].median())
 
-    return metadata, all_dataset
+    print(f"Saving cleaned dataset to {data_dir}/cleaned_dataset.csv")
+    all_dataset.to_csv(f"{data_dir}/cleaned_dataset.csv")
+    print(f"Total patients: {all_dataset.shape[0]}")
 
-
-# class bagLoader(Dataset):
-#     def __init__(self, opt, data, split):
-#         self.data = data[split]
-#         self.patnames = list(self.data.keys())
-
-#     def __getitem__(self, idx):
-#         pname = self.patnames[idx]
-#         # select 9 random images
-#         imgs = self.data[pname]['images']
-#         idxs = np.random.choice(len(imgs), 9, replace=False)
-#         imgs = torch.tensor(imgs[idxs]).type(torch.FloatTensor).squeeze(1)
-
-#         omics = torch.tensor(self.data[pname]['omics']).type(torch.FloatTensor)
-
-#         e = torch.tensor(self.data[pname]['labels'][0]).type(torch.FloatTensor)
-#         t = torch.tensor(self.data[pname]['labels'][1]).type(torch.FloatTensor)
-#         g = torch.tensor(self.data[pname]['labels'][2]).type(torch.LongTensor)
-
-#         return (imgs, 0, omics, e, t, g)  # 9, null, 1, 1, 1, 1
-
-#     def __len__(self):
-#         return len(self.patnames)
-
-
-# ################
-# # Dataset Class
-# ################
-
-# # data is a pkl file made in make_splits with the following keys:
-# #    - data_pd : pandas dataframe with all the data
-# #    - pat2img : dictionary with keys as TCGA IDs and values as a list of ROIs associated with that patient
-# #    - img_fnames : list of all ROIs
-# #    - cv_splits : nested dicts:
-# #        1. keys are the split number (0-15)
-# #        2. values are dicts with keys 'train', 'test'
-# #        3. values of 'train' and 'test' are dicts with keys 'x_patname', 'x_path', 'x_grph', 'x_omic', 'e', 't', 'g'
-# class PathgraphpatientLevelDataset(Dataset):
-#     def __init__(self, opt, data, split):
-#         '''
-#         Args:
-#             X = data
-#             e = overall survival event
-#             t = overall survival in months
-#         '''
-#         self.X_path = data[split]['x_path']
-#         self.X_grph = data[split]['x_grph']
-#         self.X_omic = data[split]['x_omic']
-#         self.e = data[split]['e']
-#         self.t = data[split]['t']
-#         self.g = data[split]['g']
-#         self.mode = opt.mode
-#         self.vgg = opt.use_vgg_features
-#         self.patch = 1 if opt.use_vgg_features else 0
-
-#         self.transforms = (
-#             transforms.Compose([
-#                     transforms.ToTensor(),
-#                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-#                 ]) if self.patch else transforms.Compose([
-#                     transforms.RandomHorizontalFlip(0.5),
-#                     transforms.RandomVerticalFlip(0.5),
-#                     transforms.RandomCrop(512),
-#                     transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05, hue=0.01),
-#                     transforms.ToTensor(),
-#                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-#                 ])
-#         )
-
-#     def __getitem__(self, index):
-#         single_e = torch.tensor(self.e[index]).type(torch.FloatTensor)
-#         single_t = torch.tensor(self.t[index]).type(torch.FloatTensor)
-#         single_g = torch.tensor(self.g[index]).type(torch.LongTensor)
-
-#         loaders = {
-#             'path': (lambda: (self.transforms(Image.open(self.X_path[index]).convert('RGB')), 0, 0)),
-#             'graph': (lambda: (0, torch.load(self.X_grph[index]), 0)),
-#             'omic': (lambda: (0, 0, torch.tensor(self.X_omic[index]).type(torch.FloatTensor))),
-#         } if not self.vgg else {
-#             'path': (lambda: (torch.tensor(self.X_path[index]).type(torch.FloatTensor).squeeze(0), 0, 0)),
-#             'graph': (lambda: (0, torch.load(self.X_grph[index]), 0)),
-#             'omic': (lambda: (0, 0, torch.tensor(self.X_omic[index]).type(torch.FloatTensor))),
-#             'pathomic': (lambda: (torch.tensor(self.X_path[index]).type(torch.FloatTensor).squeeze(0), 0, torch.tensor(self.X_omic[index]).type(torch.FloatTensor))),
-#             'graphomic': (lambda: (0, torch.load(self.X_grph[index]), torch.tensor(self.X_omic[index]).type(torch.FloatTensor))),
-#             'pathgraph': (lambda: (torch.tensor(self.X_path[index]).type(torch.FloatTensor).squeeze(0), torch.load(self.X_grph[index]), 0)),
-#             'pathgraphomic': (lambda: (torch.tensor(self.X_path[index]).type(torch.FloatTensor).squeeze(0), torch.load(self.X_grph[index]), torch.tensor(self.X_omic[index]).type(torch.FloatTensor)))
-#         }
-#         return (*loaders.get(self.mode, (lambda: (None, None, None)))(), single_e, single_t, single_g)
-
-#     def __len__(self):
-#         return len(self.X_path)
+    return labels, all_dataset

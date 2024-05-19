@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--n_epochs", type=int, default=50, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=0.002, help="Learning rate")
+    parser.add_argument("--lr_fix", type=int, default=0, help="Epochs before lr decay")
     parser.add_argument("--l1", type=float, default=3e-4, help="L1 weight")
     parser.add_argument("--l2", type=float, default=4e-4, help="L2 weight")
     parser.add_argument("--collate", type=str, default="min", help="Collate function")
@@ -39,7 +40,7 @@ def parse_args():
         parser.set_defaults(l1=0)
     # NOTE: Dont like these settings but they are in the paper, only using for instance MIL
     if opt.model in ("pathomic", "graphomic") and opt.mil in ('instance', 'paper'):
-        parser.set_defaults(lr=0.0001, adam_b1=0.5)
+        parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
 
     opt = parser.parse_known_args()[0]
 
