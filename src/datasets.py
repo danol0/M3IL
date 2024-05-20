@@ -228,7 +228,7 @@ def get_splits(opt, data_dir="./data"):
 
 # TODO: allow for different moltype ignore etc
 def getCleanAllDataset(
-    data_dir="./data/omics",
+    data_dir="./data",
     use_rnaseq=False,
     rm_missing_omics=True,
     rm_missing_grade=True,
@@ -240,10 +240,10 @@ def getCleanAllDataset(
         "Event",
     ]
 
-    all_dataset = pd.read_csv(f"{data_dir}/all_dataset.csv").drop("indexes", axis=1)
+    all_dataset = pd.read_csv(f"{data_dir}/omics/all_dataset.csv").drop("indexes", axis=1)
     all_dataset.set_index("TCGA ID", inplace=True)
 
-    all_grade = pd.read_csv(f"{data_dir}/grade_data.csv")
+    all_grade = pd.read_csv(f"{data_dir}/omics/grade_data.csv")
 
     all_grade.set_index("TCGA ID", inplace=True)
 
@@ -304,8 +304,8 @@ def getCleanAllDataset(
         for col in all_dataset.drop(labels, axis=1).columns:
             all_dataset[col] = all_dataset[col].fillna(all_dataset[col].median())
 
-    print(f"Saving cleaned dataset to {data_dir}/cleaned_dataset.csv")
-    all_dataset.to_csv(f"{data_dir}/cleaned_dataset.csv")
+    print(f"Saving cleaned dataset to {data_dir}/omics/cleaned_dataset.csv")
+    all_dataset.to_csv(f"{data_dir}/omics/cleaned_dataset.csv")
     print(f"Total patients: {all_dataset.shape[0]}")
 
     return labels, all_dataset
