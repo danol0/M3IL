@@ -7,3 +7,6 @@ checkpoints*
 *.lprof
 wandb/*
 .vscode/*
+!requirements.txt
+*.zip
+*.DS_Store

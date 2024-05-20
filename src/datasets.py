@@ -20,9 +20,6 @@ def define_dataset(opt):
 
 
 # --- Dataset Class ---
-# TODO: Implement paperDataset
-
-
 class instanceLevelDataset(Dataset):
     """Defines a multimodal pathology dataset of instance level combinations."""
 
@@ -105,7 +102,7 @@ class patientLevelDataset(Dataset):
 # --- Collate functions ---
 def define_collate_fn(opt):
     if opt.mil in ("instance", "paper"):
-        return default_collate
+        return mixed_collate
     else:
         if opt.collate == "min":
             return select_min
@@ -115,8 +112,20 @@ def define_collate_fn(opt):
             raise NotImplementedError(f"Collate function {opt.collate} not implemented")
 
 
+def mixed_collate(batch):
+    return (
+        (
+            prepare_graph_batch(samples)
+            if isinstance(samples[0], Batch)
+            else default_collate(samples)
+        )
+        for samples in zip(*batch)
+    )
+
+
 def prepare_graph_batch(graph):
     n_graphs = torch.Tensor([0])
+    # Handle case when passing an empty tensor
     if not isinstance(graph[0], torch.Tensor):
         n_graphs = torch.Tensor([len(g.ptr) - 1 for g in graph]).long()
         graph = Batch.from_data_list(graph)
@@ -132,15 +141,8 @@ def select_min(batch):
         # select min_imgs random images from each patient
         path = [img[torch.randperm(img.size(0))[:min_imgs]] for img in path]
 
-    return (
-        torch.stack(omic),
-        torch.stack(path),
-        prepare_graph_batch(graph),
-        torch.stack(event),
-        torch.stack(time),
-        torch.stack(grade),
-        pname,
-    )
+    batch = list(zip(omic, path, graph, event, time, grade, pname))
+    return mixed_collate(batch)
 
 
 def pad2max(batch):
@@ -153,16 +155,8 @@ def pad2max(batch):
         torch.cat([img, img.new_zeros(max_imgs - img.size(0), *img.size()[1:])])
         for img in path
     ]
-
-    return (
-        torch.stack(omic),
-        torch.stack(path),
-        prepare_graph_batch(graph),
-        torch.stack(event),
-        torch.stack(time),
-        torch.stack(grade),
-        pname,
-    )
+    batch = list(zip(omic, path, graph, event, time, grade, pname))
+    return mixed_collate(batch)
 
 
 # --- Data loading ---
@@ -170,14 +164,14 @@ def get_splits(opt, data_dir="./data"):
     rmomics = 1 if "omic" in opt.model else 0
     rmgrade = 1 if opt.task in ["multi", "grad"] else 0
     labels, dataset = getCleanAllDataset(
-        use_rnaseq=opt.rna, rm_missing_omics=rmomics, rm_missing_grade=rmgrade
+        use_rnaseq=opt.rna, rm_missing_omics=rmomics, rm_missing_grade=rmgrade, data_dir=data_dir
     )
     split_data = {}
 
     pnas_splits = pd.read_csv(f"{data_dir}/splits/pnas_splits.csv")
     pnas_splits.columns = ["TCGA ID"] + [k for k in range(1, 16)]
     pnas_splits.set_index("TCGA ID", inplace=True)
-    pnas_splits = pnas_splits.map(lambda x: x.lower())
+    pnas_splits = pnas_splits.applymap(lambda x: x.lower())
 
     vgg_ftype = "surv" if opt.task == "multi" else opt.task
     vgg_feats = pickle.load(open(f"{data_dir}/vgg_features_{vgg_ftype}.pkl", "rb"))

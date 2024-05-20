@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 import torch
 import torch.nn.functional as F
 from lifelines.utils import concordance_index
@@ -11,7 +10,42 @@ import wandb
 
 # from line_profiler import profile
 
-# --- Utility ---
+# --- Training ---
+
+
+# Predictions are not independent in Coxloss, ie calculating over batch != whole dataset
+def loss_fn(model, grade, time, event, grade_pred, hazard_pred, opt):
+    w_nll = 0 if opt.task == "surv" else 1
+    w_cox = 0 if opt.task == "grad" else 1
+    return (
+        w_nll * F.nll_loss(grade_pred, grade)
+        + opt.l1 * l1_reg(model)
+        + w_cox * CoxLoss(time, event, hazard_pred)
+    )
+
+
+def CoxLoss(survtime, event, hazard_pred):
+    R_mat = (survtime.repeat(len(survtime), 1) >= survtime.unsqueeze(1)).int()
+    theta = hazard_pred.view(-1)
+    exp_theta = theta.exp()
+    loss_cox = -torch.mean((theta - (exp_theta * R_mat).sum(dim=1).log()) * event)
+    return loss_cox
+
+
+def l1_reg(model):
+    # We only regularise the omic_net
+    if hasattr(model, "omic_net"):
+        return sum(torch.abs(W).sum() for W in model.omic_net.parameters())
+    else:
+        return sum(torch.abs(W).sum() for W in model.parameters())
+
+
+def define_scheduler(opt, optimizer):
+    def lambda_rule(epoch):
+        lr_l = 1.0 - max(0, epoch - opt.lr_fix) / float(opt.n_epochs - opt.lr_fix)
+        return lr_l
+
+    return lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_rule)
 
 
 def mkdir(path):
@@ -165,49 +199,3 @@ def evaluate(model, data_loader, opt, precomp=None, return_preds=False):
         return loss, accuracy, auc, c_indx, all_preds
     else:
         return loss, accuracy, auc, c_indx
-
-
-def calc_cindex(all_surv):
-    """all_surv: list of [hazard_pred, event, time] for each batch."""
-    all_preds = np.concatenate([x[0] for x in all_surv])
-    all_event = np.concatenate([x[1] for x in all_surv])
-    all_time = np.concatenate([x[2] for x in all_surv])
-    return concordance_index(all_time, -all_preds, all_event)
-
-
-# --- Training ---
-
-
-# Predictions are not independent in Coxloss, ie calculating over batch != whole dataset
-def loss_fn(model, grade, time, event, grade_pred, hazard_pred, opt):
-    w_nll = 0 if opt.task == "surv" else 1
-    w_cox = 0 if opt.task == "grad" else 1
-    return (
-        w_nll * F.nll_loss(grade_pred, grade)
-        + opt.l1 * l1_reg(model)
-        + w_cox * CoxLoss(time, event, hazard_pred)
-    )
-
-
-def CoxLoss(survtime, event, hazard_pred):
-    R_mat = (survtime.repeat(len(survtime), 1) >= survtime.unsqueeze(1)).int()
-    theta = hazard_pred.view(-1)
-    exp_theta = theta.exp()
-    loss_cox = -torch.mean((theta - (exp_theta * R_mat).sum(dim=1).log()) * event)
-    return loss_cox
-
-
-def l1_reg(model):
-    # We only regularise the omic_net
-    if hasattr(model, "omic_net"):
-        return sum(torch.abs(W).sum() for W in model.omic_net.parameters())
-    else:
-        return sum(torch.abs(W).sum() for W in model.parameters())
-
-
-def define_scheduler(opt, optimizer):
-    def lambda_rule(epoch):
-        lr_l = 1.0 - max(0, epoch - opt.lr_fix) / float(opt.n_epochs - opt.lr_fix)
-        return lr_l
-
-    return lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_rule)

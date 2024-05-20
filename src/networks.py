@@ -4,7 +4,7 @@ from torch.nn import Parameter
 from torch_geometric.nn import SAGEConv, SAGPooling
 from torch.nn import functional as F
 from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
-from src.fusion import define_bifusion
+from src.fusion import define_fusion
 
 
 # --- Utility ---
@@ -12,6 +12,14 @@ def define_model(opt):
     omic_dim = 320 if opt.rna else 80
     if opt.model == "omic":
         model = FFN(input_dim=omic_dim, omic_dim=32, dropout=opt.dropout)
+    elif opt.model == "graph":
+        model = GraphNet(dropout_rate=opt.dropout)
+    elif opt.model == "pathomic":
+        model = PathomicNet(opt, omic_xdim=omic_dim)
+    elif opt.model == "graphomic":
+        model = GraphomicNet(opt, omic_xdim=omic_dim)
+    elif opt.model == "pathgraphomic":
+        model = PathgraphomicNet(opt, omic_xdim=omic_dim)
     elif opt.model == "pathomic_qbt":
         model = QBTNet(
             opt,
@@ -20,12 +28,6 @@ def define_model(opt):
             transformer_layers=12,
             omic_xdim=omic_dim,
         )
-    elif opt.model == "graph":
-        model = GraphNet(dropout_rate=opt.dropout)
-    elif opt.model == "pathomic":
-        model = PathomicNet(opt, omic_xdim=omic_dim, feature_dim=32)
-    elif opt.model == "graphomic":
-        model = GraphomicNet(opt, omic_xdim=omic_dim)
     else:
         raise NotImplementedError(f"Model {opt.model} not implemented")
     return model
@@ -161,8 +163,9 @@ class GraphNet(torch.nn.Module):
 
 # --- FUSION ---
 class PathomicNet(nn.Module):
-    def __init__(self, opt, omic_xdim=80, feature_dim=32):
+    def __init__(self, opt, omic_xdim=80):
         super().__init__()
+        feature_dim = 32
         mmhid = 64
         dropout = opt.dropout
         # TODO: experiment with reduced dropout layers
@@ -177,7 +180,7 @@ class PathomicNet(nn.Module):
         # TODO: learned/flexible aggregation
         self.bagged = 1 if opt.mil == "pat" else 0
 
-        self.fusion = define_bifusion(opt)
+        self.fusion = define_fusion(opt)
         self.grade_clf = nn.Sequential(nn.Linear(mmhid, 3), nn.LogSoftmax(dim=1))
         self.hazard_clf = nn.Sequential(nn.Linear(mmhid, 1), nn.Sigmoid())
 
@@ -203,37 +206,90 @@ class GraphomicNet(nn.Module):
         super().__init__()
         dropout = opt.dropout
         feature_dim = 32
-        self.grph_net = GraphNet(dropout_rate=opt.dropout)
+        mmhid = 64
+        self.graph_net = GraphNet(dropout_rate=opt.dropout)
         self.omic_net = FFN(
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
         )
 
         rna = "_rna" if opt.rna else ""
-        omic_ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        omic_ckpt = torch.load(
+            f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt"
+        )
         self.omic_net.load_state_dict(omic_ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
-        grph_ckpt = torch.load(f"checkpoints/{opt.task}/graph/graph_{opt.k}.pt")
-        self.grph_net.load_state_dict(grph_ckpt["model"])
-        self.grph_net = self.grph_net.to(opt.device)
+        graph_ckpt = torch.load(
+            f"checkpoints/{opt.task}/graph_{opt.mil}/graph_{opt.k}.pt"
+        )
+        self.graph_net.load_state_dict(graph_ckpt["model"])
+        self.graph_net = self.graph_net.to(opt.device)
 
-        self.fusion = define_bifusion(opt)
-        self.grade_clf = nn.Sequential(nn.Linear(feature_dim, 3), nn.LogSoftmax(dim=1))
-        self.hazard_clf = nn.Sequential(nn.Linear(feature_dim, 1), nn.Sigmoid())
+        self.fusion = define_fusion(opt)
+        self.grade_clf = nn.Sequential(nn.Linear(mmhid, 3), nn.LogSoftmax(dim=1))
+        self.hazard_clf = nn.Sequential(nn.Linear(mmhid, 1), nn.Sigmoid())
 
         self.register_buffer("output_range", torch.FloatTensor([6]))
         self.register_buffer("output_shift", torch.FloatTensor([-3]))
 
         self.omic_net.freeze(True)
-        self.grph_net.freeze(True)
+        self.graph_net.freeze(True)
 
     def forward(self, **kwargs):
-        grph_vec, _ = self.grph_net(x_grph=kwargs["x_grph"])
-        omic_vec, _ = self.omic_net(x_omic=kwargs["x_omic"])
-        features = self.fusion(grph_vec, omic_vec)
+        graph_vec, _, _ = self.graph_net(x_graph=kwargs["x_graph"])
+        omic_vec, _, _ = self.omic_net(x_omic=kwargs["x_omic"])
+        features = self.fusion(graph_vec, omic_vec)
         grade = self.grade_clf(features)
         hazard = self.hazard_clf(features) * self.output_range + self.output_shift
 
         return features, grade, hazard
+
+
+class PathgraphomicNet(nn.Module):
+    def __init__(self, opt, omic_xdim=80):
+        super().__init__()
+        dropout = opt.dropout
+        feature_dim = 32
+        mmhid = 96
+        self.graph_net = GraphNet(dropout_rate=opt.dropout)
+        self.omic_net = FFN(
+            input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
+        )
+
+        rna = "_rna" if opt.rna else ""
+        omic_ckpt = torch.load(
+            f"checkpoints/{opt.task}/omic{rna}_{opt.mil}/omic_{opt.k}.pt"
+        )
+        self.omic_net.load_state_dict(omic_ckpt["model"])
+        self.omic_net = self.omic_net.to(opt.device)
+        graph_ckpt = torch.load(
+            f"checkpoints/{opt.task}/graph_{opt.mil}/graph_{opt.k}.pt"
+        )
+        self.graph_net.load_state_dict(graph_ckpt["model"])
+        self.graph_net = self.graph_net.to(opt.device)
+
+        self.fusion = define_fusion(opt)
+        self.grade_clf = nn.Sequential(nn.Linear(mmhid, 3), nn.LogSoftmax(dim=1))
+        self.hazard_clf = nn.Sequential(nn.Linear(mmhid, 1), nn.Sigmoid())
+
+        self.register_buffer("output_range", torch.FloatTensor([6]))
+        self.register_buffer("output_shift", torch.FloatTensor([-3]))
+
+        self.omic_net.freeze(True)
+        self.graph_net.freeze(True)
+
+    def forward(self, **kwargs):
+        path_vec = kwargs["x_path"]
+        graph_vec, _, _ = self.graph_net(x_graph=kwargs["x_graph"])
+        omic_vec, _, _ = self.omic_net(x_omic=kwargs["x_omic"])
+        features = self.fusion(path_vec, graph_vec, omic_vec)
+        hazard = self.classifier(features)
+        if self.act is not None:
+            hazard = self.act(hazard)
+
+            if isinstance(self.act, nn.Sigmoid):
+                hazard = hazard * self.output_range + self.output_shift
+
+        return features, hazard
 
 
 # --- QBT ---

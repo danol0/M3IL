@@ -1,0 +1,10 @@
+accelerate
+lifelines
+numpy
+pandas
+scikit_learn
+tabulate
+torch
+torch_geometric
+tqdm
+wandb

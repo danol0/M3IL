@@ -12,7 +12,7 @@ import wandb
 from src.datasets import define_dataset, get_splits, define_collate_fn
 from src.networks import define_model
 from src.options import parse_args
-import src.utils as utls
+import src.utils as utils
 
 # from line_profiler import profile
 # from torch.profiler import profile, record_function, ProfilerActivity
@@ -36,7 +36,7 @@ def train(model, split_data, accelerator, opt):
     optim = torch.optim.Adam(
         model.parameters(), betas=(opt.adam_b1, 0.999), lr=opt.lr, weight_decay=opt.l2
     )
-    scheduler = utls.define_scheduler(opt, optim)
+    scheduler = utils.define_scheduler(opt, optim)
     model, train_loader, test_loader, optim, scheduler = accelerator.prepare(
         model, train_loader, test_loader, optim, scheduler
     )
@@ -46,12 +46,12 @@ def train(model, split_data, accelerator, opt):
 
         model.train()
         train_loss = 0
-        all_preds = utls.make_empty_data_dict()
+        all_preds = utils.make_empty_data_dict()
 
         if epoch == 5:
             if opt.model in ("pathomic_qbt", "pathomic"):
                 model.omic_net.freeze(False)
-            if opt.model in ("graphomic", ""):
+            if opt.model in ("graphomic", "pathgraphomic"):
                 model.omic_net.freeze(False)
                 model.graph_net.freeze(False)
 
@@ -59,7 +59,7 @@ def train(model, split_data, accelerator, opt):
             # --- Forward pass ---
             optim.zero_grad()
             _, grade_pred, hazard_pred = model(x_omic=omic, x_path=path, x_graph=graph)
-            loss = utls.loss_fn(model, grade, time, event, grade_pred, hazard_pred, opt)
+            loss = utils.loss_fn(model, grade, time, event, grade_pred, hazard_pred, opt)
             accelerator.backward(loss)
             optim.step()
 
@@ -76,14 +76,14 @@ def train(model, split_data, accelerator, opt):
 
         scheduler.step()
         train_loss /= len(train_loader.dataset)
-        desc = utls.log_epoch(
+        desc = utils.log_epoch(
             epoch, model, train_loader, test_loader, opt, train_loss, all_preds
         )
         pbar.set_description(desc)
 
     metrics, preds = [], []
     for loader, name in [(train_loader, "Train"), (test_loader, "Test")]:
-        loss, accuracy, auc, c_indx, all_preds = utls.evaluate(
+        loss, accuracy, auc, c_indx, all_preds = utils.evaluate(
             model, loader, opt, return_preds=True
         )
         all_preds["split"] = name
@@ -137,9 +137,9 @@ if __name__ == "__main__":
         print(tabulate(mtable, **tkwgs))
 
         metrics_list.append(metrics[1][2:])
-        utls.save_model(model, opt, preds) if not opt.dry_run else None
+        utils.save_model(model, opt, preds) if not opt.dry_run else None
 
-    rtable = utls.make_results_table(metrics_list, opt.folds)
+    rtable = utils.make_results_table(metrics_list, opt.folds)
     print(rtable)
 
     if not opt.dry_run:
