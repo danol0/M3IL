@@ -116,6 +116,9 @@ if __name__ == "__main__":
         group = f"{opt.task}_{opt.model}{rna}_{opt.mil}"
     print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
     for k in range(1, opt.folds + 1):
+        if not opt.overwrite and os.path.exists(f"{opt.ckpt_dir}/{opt.model}_{k}.pt"):
+            print(f"Skipping split {k}")
+            continue
         opt.k = k
         wandb.init(
             reinit=True,

@@ -365,7 +365,8 @@ class PathgraphomicNet(nn.Module):
     def forward(self, **kwargs):
         path_vec = kwargs["x_path"]
         if self.bagged:
-            path_vec = path_vec.sum(dim=1)
+            mask = torch.any(path_vec != 0, dim=-1)
+            path_vec = path_vec.sum(dim=1) / mask.sum(dim=1, keepdim=True)
         graph_vec, _, _ = self.graph_net(x_graph=kwargs["x_graph"])
         omic_vec, _, _ = self.omic_net(x_omic=kwargs["x_omic"])
         features = self.fusion(path_vec, graph_vec, omic_vec)

@@ -10,6 +10,7 @@ def parse_args():
     parser.add_argument("--dry_run", type=int, default=0, help="No save or log")
     parser.add_argument("--folds", type=int, default=15, choices=range(1, 16))
     parser.add_argument("--data_dir", type=str, default="data")
+    parser.add_argument("--overwrite", type=int, default=0, help="Overwrite existing ckpts")
 
     # Experiment args
     parser.add_argument("--model", type=str, default="omic")
@@ -43,7 +44,7 @@ def parse_args():
     if opt.model in ("path", "graph"):
         parser.set_defaults(l1=0)
     # NOTE: Dont like these settings but they are in the paper, only using for instance MIL
-    if opt.model in ("pathomic", "graphomic", "pathgraphomic") and opt.mil in ('instance', 'paper'):
+    if opt.model in ("pathomic", "graphomic", "pathgraphomic"): # and opt.mil in ('instance', 'paper'):
         parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
 
     opt = parser.parse_known_args()[0]
