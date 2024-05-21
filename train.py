@@ -97,7 +97,8 @@ def train(model, split_data, accelerator, opt):
 if __name__ == "__main__":
     opt, str_opt = parse_args()
     print(str_opt)
-    accelerator = Accelerator(cpu=False)
+    cpu = False if opt.model == "path" else True
+    accelerator = Accelerator(cpu=cpu)
     device = accelerator.device
     print(f"Device: {device}")
     opt.device = device

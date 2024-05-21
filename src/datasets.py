@@ -63,7 +63,7 @@ class instanceLevelDataset(Dataset):
     def __getitem__(self, idx):
         pat, i, j = self.combinations[idx]
 
-        omic, path, graph = torch.tensor([0]), torch.tensor([0]), torch.tensor([0])
+        omic, path, graph = 0, 0, 0
 
         if "omic" in self.model:
             omic = torch.tensor(self.data[pat]["x_omic"], dtype=torch.float32)
@@ -102,8 +102,8 @@ class patientLevelDataset(Dataset):
 
     def __getitem__(self, idx):
         pname = self.patnames[idx]
-        # Empty tensors are compatible with downstream operations
-        omic, path, graph = torch.tensor([0]), torch.tensor([0]), torch.tensor([0])
+
+        omic, path, graph = 0, 0, 0
 
         if "omic" in self.model:
             omic = torch.tensor(self.data[pname]["x_omic"], dtype=torch.float32)
@@ -192,7 +192,8 @@ def pad2max(batch, device):
 
 
 # --- Data loading ---
-def get_splits(opt, data_dir="./data"):
+def get_splits(opt):
+    data_dir = opt.data_dir
     rmomics = 1 if "omic" in opt.model else 0
     rmgrade = 1 if opt.task in ["multi", "grad"] else 0
     labels, dataset = get_all_dataset(

@@ -9,6 +9,7 @@ def parse_args():
     # Run settings
     parser.add_argument("--dry_run", type=int, default=0, help="No save or log")
     parser.add_argument("--folds", type=int, default=15, choices=range(1, 16))
+    parser.add_argument("--data_dir", type=str, default="data")
 
     # Experiment args
     parser.add_argument("--model", type=str, default="omic")
@@ -31,6 +32,8 @@ def parse_args():
     opt = parser.parse_known_args()[0]
 
     # Defaults that dynamically align with paper (if not overridden)
+    if opt.model == "path":
+        parser.set_defaults(batch_size=8, lr=0.0005, l1=0)
     if opt.model == "omic":
         parser.set_defaults(batch_size=64, l2=5e-4)
     if opt.task == "grad" or opt.model in ("path", "graph"):

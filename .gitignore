@@ -10,3 +10,4 @@ wandb/*
 !requirements.txt
 *.zip
 *.DS_Store
+env.yml
