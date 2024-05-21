@@ -28,7 +28,7 @@ def define_fusion(opt):
             feature_dim=32,
             scale_dim1=path_scale,
             scale_dim2=omic_scale,
-            dropout_rate=opt.dropout,
+            dropout=opt.dropout,
         )
     elif opt.model == "graphomic":
         return BilinearFusion(
@@ -38,7 +38,7 @@ def define_fusion(opt):
             feature_dim=32,
             scale_dim1=graph_scale,
             scale_dim2=omic_scale,
-            dropout_rate=opt.dropout,
+            dropout=opt.dropout,
         )
     elif opt.model == "pathgraphomic":
         return TrilinearFusion(
@@ -70,7 +70,7 @@ class TrilinearFusion(nn.Module):
         dropout=0.25,
     ):
         super().__init__()
-        mmhid = 96
+        mmhid = 64
         feature_dim = 32
         self.gate_path = gate_path
         self.gate_graph = gate_graph
@@ -106,11 +106,11 @@ class TrilinearFusion(nn.Module):
             nn.Dropout(p=dropout),
         )
 
+        self.sigmoid = nn.Sigmoid()
+
     def _create_gate_layers(self, feature_dim, scaled_dim, dropout):
         rescale_layer = nn.Sequential(nn.Linear(feature_dim, scaled_dim), nn.ReLU())
-        gate_weight_layer = nn.Sequential(
-            nn.Bilinear(feature_dim, feature_dim, scaled_dim), nn.Sigmoid()
-        )
+        gate_weight_layer = nn.Bilinear(feature_dim, feature_dim, scaled_dim)
         out_layer = nn.Sequential(
             nn.Linear(scaled_dim, scaled_dim), nn.ReLU(), nn.Dropout(p=dropout)
         )
@@ -154,7 +154,7 @@ class TrilinearFusion(nn.Module):
 
     def _rescale_and_gate(self, x, x_gate, rescale_layer, gate_layer, out_layer, gate):
         o = rescale_layer(x)
-        w = gate_layer(x, x_gate) if gate else 1
+        w = self.sigmoid(gate_layer(x, x_gate)) if gate else 1
         o = out_layer(w * o)
         return o
 
@@ -175,7 +175,7 @@ class BilinearFusion(nn.Module):
         scale_dim2=1,
         dropout=0.25,
     ):
-        super(BilinearFusion, self).__init__()
+        super().__init__()
         self.gate1 = gate1
         self.gate2 = gate2
         self.device = device
@@ -192,7 +192,7 @@ class BilinearFusion(nn.Module):
 
         self.post_fusion_dropout = nn.Dropout(p=dropout)
         self.encoder1 = nn.Sequential(
-            nn.Linear((feature_dim + 1) * (feature_dim + 1), mmhid),
+            nn.Linear((dim1_scaled + 1) * (dim2_scaled + 1), mmhid),
             nn.ReLU(),
             nn.Dropout(p=dropout),
         )
@@ -200,11 +200,11 @@ class BilinearFusion(nn.Module):
             nn.Linear(mmhid, mmhid), nn.ReLU(), nn.Dropout(p=dropout)
         )
 
+        self.sigmoid = nn.Sigmoid()
+
     def _create_gate_layers(self, feature_dim, scaled_dim, dropout):
         rescale_layer = nn.Sequential(nn.Linear(feature_dim, scaled_dim), nn.ReLU())
-        gate_weight_layer = nn.Sequential(
-            nn.Bilinear(feature_dim, feature_dim, scaled_dim), nn.Sigmoid()
-        )
+        gate_weight_layer = nn.Bilinear(feature_dim, feature_dim, scaled_dim)
         out_layer = nn.Sequential(
             nn.Linear(scaled_dim, scaled_dim), nn.ReLU(), nn.Dropout(p=dropout)
         )
@@ -241,7 +241,7 @@ class BilinearFusion(nn.Module):
 
     def _rescale_and_gate(self, x, x_gate, rescale_layer, gate_layer, out_layer, gate):
         o = rescale_layer(x)
-        w = gate_layer(x, x_gate) if gate else 1
+        w = self.sigmoid(gate_layer(x, x_gate)) if gate else 1
         o = out_layer(w * o)
         return o
 

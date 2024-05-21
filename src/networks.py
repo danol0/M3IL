@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 from torch_geometric.nn import SAGEConv, SAGPooling
+from torch.hub import load_state_dict_from_url
 from torch.nn import functional as F
 from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 from src.fusion import define_fusion
@@ -13,7 +14,9 @@ def define_model(opt):
     if opt.model == "omic":
         model = FFN(input_dim=omic_dim, omic_dim=32, dropout=opt.dropout)
     elif opt.model == "graph":
-        model = GraphNet(dropout_rate=opt.dropout)
+        model = GraphNet(dropout=opt.dropout)
+    elif opt.model == "path":
+        model = get_vgg()
     elif opt.model == "pathomic":
         model = PathomicNet(opt, omic_xdim=omic_dim)
     elif opt.model == "graphomic":
@@ -33,11 +36,94 @@ def define_model(opt):
     return model
 
 
-def dfs_freeze(model, freeze=True):
+def dfs_freeze(model, freeze):
     for _, child in model.named_children():
         for param in child.parameters():
             param.requires_grad = not freeze
-        dfs_freeze(child)
+        dfs_freeze(child, freeze)
+
+
+# --- Path ---
+model_urls = {
+    'vgg19_bn': 'https://download.pytorch.org/models/vgg19_bn-c79401a0.pth',
+}
+
+
+class PathNet(nn.Module):
+    def __init__(self, features, path_dim=32):
+        super(PathNet, self).__init__()
+        self.conv_layers = features
+        # self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        # Avgpool for MPS compatibility
+        self.avgpool = nn.AvgPool2d(kernel_size=3, stride=2)
+        # This just gives the correct feature size after pooling
+
+        self.classifier = nn.Sequential(
+            nn.Linear(512 * 7 * 7, 1024),
+            nn.ReLU(True),
+            nn.Dropout(0.25),
+            nn.Linear(1024, 1024),
+            nn.ReLU(True),
+            nn.Dropout(0.25),
+            nn.Linear(1024, path_dim),
+            nn.ReLU(True),
+            nn.Dropout(0.05)
+        )
+
+        self.grade_clf = nn.Sequential(nn.Linear(path_dim, 3), nn.LogSoftmax(dim=1))
+        self.hazard_clf = nn.Sequential(nn.Linear(path_dim, 1), nn.Sigmoid())
+
+        self.register_buffer("output_range", torch.FloatTensor([6]))
+        self.register_buffer("output_shift", torch.FloatTensor([-3]))
+
+        dfs_freeze(self.conv_layers, freeze=True)
+
+    def forward(self, **kwargs):
+        x = kwargs['x_path']
+        x = self.conv_layers(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        features = self.classifier(x)
+        grade = self.grade_clf(features)
+        hazard = self.hazard_clf(features) * self.output_range + self.output_shift
+        return features, grade, hazard
+
+
+def make_layers(cfg, batch_norm=False):
+    layers = []
+    in_channels = 3
+    for v in cfg:
+        if v == 'M':
+            layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+        else:
+            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+            if batch_norm:
+                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+            else:
+                layers += [conv2d, nn.ReLU(inplace=True)]
+            in_channels = v
+    return nn.Sequential(*layers)
+
+
+cfgs = {
+    'E': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'],
+}
+
+
+def get_vgg(arch='vgg19_bn', cfg='E', batch_norm=True, pretrained=True, progress=True, **kwargs):
+    model = PathNet(make_layers(cfgs[cfg], batch_norm=batch_norm), **kwargs)
+
+    if pretrained:
+        pretrained_dict = load_state_dict_from_url(model_urls[arch], progress=progress)
+
+        for key in list(pretrained_dict.keys()):
+            if 'classifier' in key:
+                pretrained_dict.pop(key)
+
+        model.load_state_dict(pretrained_dict, strict=False)
+        print("Initializing Path Weights")
+
+    return model
 
 
 # --- Omic ---
@@ -53,6 +139,8 @@ class FFN(nn.Module):
             layers.append(nn.ELU())
             if i >= dropout_layer:
                 layers.append(nn.AlphaDropout(p=dropout, inplace=False))
+            else:
+                layers.append(nn.AlphaDropout(p=0, inplace=False))
 
         self.encoder = nn.Sequential(*layers)
         self.grade_clf = nn.Sequential(nn.Linear(omic_dim, 3), nn.LogSoftmax(dim=1))
@@ -68,27 +156,14 @@ class FFN(nn.Module):
         hazard = self.hazard_clf(features) * self.output_range + self.output_shift
         return features, grade, hazard
 
-    def freeze(self, freeze=True):
+    def freeze(self, freeze):
+        # print("%sreezing omic net" % ("F" if freeze else "Unf"))
         dfs_freeze(self, freeze)
 
 
 # --- Graph ---
-class NormalizeGraphs(object):
-    r"""Column-normalises nodes and edges to sum to 1."""
-
-    def __call__(self, data):
-        data.x[:, :12] = data.x[:, :12] / data.x[:, :12].max(0, keepdim=True)[0]
-        data.x = data.x.type(torch.FloatTensor)
-        data.edge_attr = data.edge_attr.type(torch.FloatTensor)
-        data.edge_attr = data.edge_attr / data.edge_attr.max(0, keepdim=True)[0]
-        return data
-
-    def __repr__(self):
-        return "{}()".format(self.__class__.__name__)
-
-
 class GraphNet(torch.nn.Module):
-    def __init__(self, dropout_rate=0.25):
+    def __init__(self, dropout=0.25):
         super().__init__()
 
         features = 1036
@@ -98,7 +173,7 @@ class GraphNet(torch.nn.Module):
         hidden = [features, nhid, nhid]
 
         pooling_ratio = 0.2
-        self.dropout_rate = dropout_rate
+        self.dropout = dropout
 
         self.convs = torch.nn.ModuleList(
             [SAGEConv(in_channels, nhid) for in_channels in hidden]
@@ -118,7 +193,7 @@ class GraphNet(torch.nn.Module):
 
     def forward(self, **kwargs):
         data, graphs_per_pat = kwargs["x_graph"]
-        data = NormalizeGraphs()(data)
+        data = self.normalize_graphs(data)
         x, edge_index, edge_attr, batch = (
             data.x,
             data.edge_index,
@@ -147,7 +222,7 @@ class GraphNet(torch.nn.Module):
         x = gap(x, batch_vector)
 
         x = F.relu(self.lin1(x))
-        x = F.dropout(x, p=self.dropout_rate)
+        x = F.dropout(x, p=self.dropout)
 
         # The result is a single feature vector for each patient that aggregates all the graphs
         features = F.relu(self.lin2(x))
@@ -157,8 +232,16 @@ class GraphNet(torch.nn.Module):
 
         return features, grade, hazard
 
-    def freeze(self, freeze=True):
+    def freeze(self, freeze):
+        # print("%sreezing graph net" % ("F" if freeze else "Unf"))
         dfs_freeze(self, freeze)
+
+    def normalize_graphs(self, data):
+        data.x[:, :12] = data.x[:, :12] / data.x[:, :12].max(0, keepdim=True)[0]
+        data.x = data.x.type(torch.FloatTensor).to(data.x.device)
+        data.edge_attr = data.edge_attr.type(torch.FloatTensor).to(data.edge_attr.device)
+        data.edge_attr = data.edge_attr / data.edge_attr.max(0, keepdim=True)[0]
+        return data
 
 
 # --- FUSION ---
@@ -192,7 +275,8 @@ class PathomicNet(nn.Module):
     def forward(self, **kwargs):
         path_vec = kwargs["x_path"]
         if self.bagged:
-            path_vec = path_vec.sum(dim=1)
+            mask = torch.any(path_vec != 0, dim=-1)
+            path_vec = path_vec.sum(dim=1) / mask.sum(dim=1, keepdim=True)
         omic_vec, _, _ = self.omic_net(x_omic=kwargs["x_omic"])
         features = self.fusion(path_vec, omic_vec)
         grade = self.grade_clf(features)
@@ -207,7 +291,7 @@ class GraphomicNet(nn.Module):
         dropout = opt.dropout
         feature_dim = 32
         mmhid = 64
-        self.graph_net = GraphNet(dropout_rate=opt.dropout)
+        self.graph_net = GraphNet(dropout=opt.dropout)
         self.omic_net = FFN(
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
         )
@@ -249,20 +333,21 @@ class PathgraphomicNet(nn.Module):
         super().__init__()
         dropout = opt.dropout
         feature_dim = 32
-        mmhid = 96
-        self.graph_net = GraphNet(dropout_rate=opt.dropout)
+        mmhid = 64
+        self.graph_net = GraphNet(dropout=opt.dropout)
         self.omic_net = FFN(
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
         )
 
+        self.bagged = 1 if opt.mil == "pat" else 0
+
         rna = "_rna" if opt.rna else ""
-        omic_ckpt = torch.load(
-            f"checkpoints/{opt.task}/omic{rna}_{opt.mil}/omic_{opt.k}.pt"
-        )
+        omic_ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
         self.omic_net.load_state_dict(omic_ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
+        mil = "instance" if opt.mil in ("instance", "paper") else opt.mil
         graph_ckpt = torch.load(
-            f"checkpoints/{opt.task}/graph_{opt.mil}/graph_{opt.k}.pt"
+            f"checkpoints/{opt.task}/graph_{mil}/graph_{opt.k}.pt"
         )
         self.graph_net.load_state_dict(graph_ckpt["model"])
         self.graph_net = self.graph_net.to(opt.device)
@@ -279,17 +364,15 @@ class PathgraphomicNet(nn.Module):
 
     def forward(self, **kwargs):
         path_vec = kwargs["x_path"]
+        if self.bagged:
+            path_vec = path_vec.sum(dim=1)
         graph_vec, _, _ = self.graph_net(x_graph=kwargs["x_graph"])
         omic_vec, _, _ = self.omic_net(x_omic=kwargs["x_omic"])
         features = self.fusion(path_vec, graph_vec, omic_vec)
-        hazard = self.classifier(features)
-        if self.act is not None:
-            hazard = self.act(hazard)
+        grade = self.grade_clf(features)
+        hazard = self.hazard_clf(features) * self.output_range + self.output_shift
 
-            if isinstance(self.act, nn.Sigmoid):
-                hazard = hazard * self.output_range + self.output_shift
-
-        return features, hazard
+        return features, grade, hazard
 
 
 # --- QBT ---

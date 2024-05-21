@@ -97,7 +97,7 @@ def train(model, split_data, accelerator, opt):
 if __name__ == "__main__":
     opt, str_opt = parse_args()
     print(str_opt)
-    accelerator = Accelerator(cpu=True)
+    accelerator = Accelerator(cpu=False)
     device = accelerator.device
     print(f"Device: {device}")
     opt.device = device
@@ -127,6 +127,7 @@ if __name__ == "__main__":
 
         model = define_model(opt)
         if k == 1:
+            print(model)
             print(
                 f"{sum(p.numel() for p in model.parameters() if p.requires_grad)} params"
             )

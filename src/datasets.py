@@ -8,6 +8,8 @@ from collections import defaultdict
 import os
 from torch_geometric.data import Batch
 from torch.utils.data.dataloader import default_collate
+from torchvision import transforms
+from PIL import Image
 
 
 def define_dataset(opt):
@@ -19,24 +21,43 @@ def define_dataset(opt):
         raise NotImplementedError(f"MIL type {opt.mil} not implemented")
 
 
+def get_transforms():
+    tr = transforms.Compose(
+        [
+            transforms.RandomHorizontalFlip(0.5),
+            transforms.RandomVerticalFlip(0.5),
+            transforms.RandomCrop(512),
+            transforms.ColorJitter(
+                brightness=0.1, contrast=0.1, saturation=0.05, hue=0.01
+            ),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+    return tr
+
+
 # --- Dataset Class ---
 class instanceLevelDataset(Dataset):
     """Defines a multimodal pathology dataset of instance level combinations."""
 
     def __init__(self, data, split, opt):
-        self.mode = opt.model
+        self.model = opt.model
         self.data = data[split]
+        self.vgg = opt.use_vgg
+        self.transform = None if self.vgg else get_transforms()
 
         combinations = []
         for pat in self.data.keys():
-            num_path = self.data[pat]["x_path"].shape[0] if "path" in self.mode else 1
-            num_graph = len(self.data[pat]["x_graph"]) if "graph" in self.mode else 1
-            if opt.mil == "paper" and "pathgraph" in self.mode:
+            num_path = len(self.data[pat]["x_path"]) if "path" in self.model else 1
+            num_graph = len(self.data[pat]["x_graph"]) if "graph" in self.model else 1
+            if opt.mil == "paper" and "pathgraph" in self.model:
                 assert num_path == num_graph * 9
                 combinations.extend([(pat, i, i // 9) for i in range(num_path)])
-            combinations.extend(
-                [(pat, i, j) for i in range(num_path) for j in range(num_graph)]
-            )
+            else:
+                combinations.extend(
+                    [(pat, i, j) for i in range(num_path) for j in range(num_graph)]
+                )
         self.combinations = combinations
 
     def __getitem__(self, idx):
@@ -44,15 +65,20 @@ class instanceLevelDataset(Dataset):
 
         omic, path, graph = torch.tensor([0]), torch.tensor([0]), torch.tensor([0])
 
-        if "omic" in self.mode:
+        if "omic" in self.model:
             omic = torch.tensor(self.data[pat]["x_omic"], dtype=torch.float32)
 
-        if "path" in self.mode:
-            path = torch.tensor(
-                self.data[pat]["x_path"][i], dtype=torch.float32
-            ).squeeze(0)
+        if "path" in self.model:
+            if self.vgg:
+                path = torch.tensor(
+                    self.data[pat]["x_path"][i], dtype=torch.float32
+                ).squeeze(0)
+            else:
+                path = self.transform(
+                    Image.open(self.data[pat]["x_path"][i]).convert("RGB")
+                )
 
-        if "graph" in self.mode:
+        if "graph" in self.model:
             graph = [torch.load(self.data[pat]["x_graph"][j])]
             graph = Batch.from_data_list(graph)
 
@@ -70,7 +96,7 @@ class patientLevelDataset(Dataset):
     """Defines a multimodal pathology dataset bagged at the patient level."""
 
     def __init__(self, data, split, opt):
-        self.mode = opt.model
+        self.model = opt.model
         self.data = data[split]
         self.patnames = list(self.data.keys())
 
@@ -79,14 +105,14 @@ class patientLevelDataset(Dataset):
         # Empty tensors are compatible with downstream operations
         omic, path, graph = torch.tensor([0]), torch.tensor([0]), torch.tensor([0])
 
-        if "omic" in self.mode:
+        if "omic" in self.model:
             omic = torch.tensor(self.data[pname]["x_omic"], dtype=torch.float32)
 
-        if "path" in self.mode:
+        if "path" in self.model:
             path = self.data[pname]["x_path"]
             path = torch.tensor(path, dtype=torch.float32).squeeze(1)
 
-        if "graph" in self.mode:
+        if "graph" in self.model:
             graph = [torch.load(g) for g in self.data[pname]["x_graph"]]
             graph = Batch.from_data_list(graph)
 
@@ -102,37 +128,43 @@ class patientLevelDataset(Dataset):
 # --- Collate functions ---
 def define_collate_fn(opt):
     if opt.mil in ("instance", "paper"):
-        return mixed_collate
+        return lambda batch: mixed_collate(batch, opt.device)
     else:
         if opt.collate == "min":
-            return select_min
+            return lambda batch: select_min(batch, opt.device)
         elif opt.collate == "pad":
-            return pad2max
+            return lambda batch: pad2max(batch, opt.device)
         else:
             raise NotImplementedError(f"Collate function {opt.collate} not implemented")
 
 
-def mixed_collate(batch):
-    return (
+def mixed_collate(batch, device):
+    collated_batch = (
         (
-            prepare_graph_batch(samples)
+            prepare_graph_batch(samples, device)
             if isinstance(samples[0], Batch)
             else default_collate(samples)
         )
         for samples in zip(*batch)
     )
 
+    collated_batch = tuple(
+        data.to(device) if isinstance(data, torch.Tensor) else data
+        for data in collated_batch
+    )
+    return collated_batch
 
-def prepare_graph_batch(graph):
+
+def prepare_graph_batch(graph, device):
     n_graphs = torch.Tensor([0])
     # Handle case when passing an empty tensor
     if not isinstance(graph[0], torch.Tensor):
-        n_graphs = torch.Tensor([len(g.ptr) - 1 for g in graph]).long()
-        graph = Batch.from_data_list(graph)
+        n_graphs = torch.Tensor([len(g.ptr) - 1 for g in graph]).long().to(device)
+        graph = Batch.from_data_list(graph).to(device)
     return graph, n_graphs
 
 
-def select_min(batch):
+def select_min(batch, device):
     omic, path, graph, event, time, grade, pname = zip(*batch)
 
     # find minimum number of images
@@ -142,10 +174,10 @@ def select_min(batch):
         path = [img[torch.randperm(img.size(0))[:min_imgs]] for img in path]
 
     batch = list(zip(omic, path, graph, event, time, grade, pname))
-    return mixed_collate(batch)
+    return mixed_collate(batch, device)
 
 
-def pad2max(batch):
+def pad2max(batch, device):
     omic, path, graph, event, time, grade, pname = zip(*batch)
 
     # find max number of images
@@ -156,15 +188,18 @@ def pad2max(batch):
         for img in path
     ]
     batch = list(zip(omic, path, graph, event, time, grade, pname))
-    return mixed_collate(batch)
+    return mixed_collate(batch, device)
 
 
 # --- Data loading ---
 def get_splits(opt, data_dir="./data"):
     rmomics = 1 if "omic" in opt.model else 0
     rmgrade = 1 if opt.task in ["multi", "grad"] else 0
-    labels, dataset = getCleanAllDataset(
-        use_rnaseq=opt.rna, rm_missing_omics=rmomics, rm_missing_grade=rmgrade, data_dir=data_dir
+    labels, dataset = get_all_dataset(
+        use_rnaseq=opt.rna,
+        rm_missing_omics=rmomics,
+        rm_missing_grade=rmgrade,
+        data_dir=data_dir,
     )
     split_data = {}
 
@@ -173,8 +208,11 @@ def get_splits(opt, data_dir="./data"):
     pnas_splits.set_index("TCGA ID", inplace=True)
     pnas_splits = pnas_splits.applymap(lambda x: x.lower())
 
-    vgg_ftype = "surv" if opt.task == "multi" else opt.task
-    vgg_feats = pickle.load(open(f"{data_dir}/vgg_features_{vgg_ftype}.pkl", "rb"))
+    if opt.use_vgg:
+        vgg_ftype = "surv" if opt.task == "multi" else opt.task
+        vgg_feats = pickle.load(
+            open(f"{data_dir}/path/vgg_features_{vgg_ftype}.pkl", "rb")
+        )
 
     pat2roi = defaultdict(list)
     roi2patch = defaultdict(list)
@@ -182,21 +220,26 @@ def get_splits(opt, data_dir="./data"):
         pat2roi[roi_fname[:12]].append(roi_fname.rstrip(".pt"))
         # We do this with nested loops to preserve the order of the patches
         # This allows us to match the patches to parent graphs as done in the paper
-        for img_fname in vgg_feats.keys():
-            if img_fname.startswith(roi_fname.rstrip(".pt")):
-                roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
+        if opt.use_vgg:
+            for img_fname in vgg_feats.keys():
+                if img_fname.startswith(roi_fname.rstrip(".pt")):
+                    roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
 
     for k in range(1, opt.folds + 1):
         split_data[k] = {
             split: {
                 pat: {
                     "x_omic": dataset.loc[pat].drop(labels).values.astype(np.float32),
-                    "x_path": np.stack(
-                        [
-                            vgg_feats[patch]
-                            for roi in pat2roi[pat]
-                            for patch in roi2patch[roi]
-                        ]
+                    "x_path": (
+                        np.stack(
+                            [
+                                vgg_feats[patch]  # vgg_feats[k][patch]
+                                for roi in pat2roi[pat]
+                                for patch in roi2patch[roi]
+                            ]
+                        )
+                        if opt.use_vgg
+                        else [f"{data_dir}/path/ROIs/{roi}.png" for roi in pat2roi[pat]]
                     ),
                     "x_graph": [f"{data_dir}/graphs/{roi}.pt" for roi in pat2roi[pat]],
                     "y": [
@@ -226,8 +269,7 @@ def get_splits(opt, data_dir="./data"):
     return split_data
 
 
-# TODO: allow for different moltype ignore etc
-def getCleanAllDataset(
+def get_all_dataset(
     data_dir="./data",
     use_rnaseq=False,
     rm_missing_omics=True,
@@ -240,7 +282,9 @@ def getCleanAllDataset(
         "Event",
     ]
 
-    all_dataset = pd.read_csv(f"{data_dir}/omics/all_dataset.csv").drop("indexes", axis=1)
+    all_dataset = pd.read_csv(f"{data_dir}/omics/all_dataset.csv").drop(
+        "indexes", axis=1
+    )
     all_dataset.set_index("TCGA ID", inplace=True)
 
     all_grade = pd.read_csv(f"{data_dir}/omics/grade_data.csv")
@@ -259,14 +303,15 @@ def getCleanAllDataset(
     all_dataset["Event"] = 1 - all_dataset["censored"]
 
     if use_rnaseq:
+        print("Adding RNAseq data")
         gbm = pd.read_csv(
-            f"{data_dir}/mRNA_Expression_z-Scores_RNA_Seq_RSEM.txt",
+            f"{data_dir}/omics/mRNA_Expression_z-Scores_RNA_Seq_RSEM.txt",
             sep="\t",
             skiprows=1,
             index_col=0,
         )
         lgg = pd.read_csv(
-            f"{data_dir}/mRNA_Expression_Zscores_RSEM.txt",
+            f"{data_dir}/omics/mRNA_Expression_Zscores_RSEM.txt",
             sep="\t",
             skiprows=1,
             index_col=0,
