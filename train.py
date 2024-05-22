@@ -31,7 +31,7 @@ def train(model, split_data, accelerator, opt):
         )
         for s in ["train", "test"]
     )
-    print(f"{len(train_loader.dataset)} train samples")
+    print(f"{len(train_loader.dataset)} train samples | {len(train_loader) * opt.n_epochs} gradient steps")
 
     optim = torch.optim.Adam(
         model.parameters(), betas=(opt.adam_b1, 0.999), lr=opt.lr, weight_decay=opt.l2
@@ -40,6 +40,7 @@ def train(model, split_data, accelerator, opt):
     model, train_loader, test_loader, optim, scheduler = accelerator.prepare(
         model, train_loader, test_loader, optim, scheduler
     )
+    loss_fn = utils.PathomicLoss(opt)
 
     pbar = tqdm(range(opt.n_epochs), total=opt.n_epochs)
     for epoch in pbar:
@@ -59,7 +60,7 @@ def train(model, split_data, accelerator, opt):
             # --- Forward pass ---
             optim.zero_grad()
             _, grade_pred, hazard_pred = model(x_omic=omic, x_path=path, x_graph=graph)
-            loss = utils.loss_fn(model, grade, time, event, grade_pred, hazard_pred, opt)
+            loss = loss_fn(model, grade, time, event, grade_pred, hazard_pred)
             accelerator.backward(loss)
             optim.step()
 
@@ -77,14 +78,14 @@ def train(model, split_data, accelerator, opt):
         scheduler.step()
         train_loss /= len(train_loader.dataset)
         desc = utils.log_epoch(
-            epoch, model, train_loader, test_loader, opt, train_loss, all_preds
+            epoch, model, train_loader, test_loader, loss_fn, opt, train_loss, all_preds
         )
         pbar.set_description(desc)
 
     metrics, preds = [], []
     for loader, name in [(train_loader, "Train"), (test_loader, "Test")]:
         loss, accuracy, auc, c_indx, all_preds = utils.evaluate(
-            model, loader, opt, return_preds=True
+            model, loader, loss_fn, opt, return_preds=True
         )
         all_preds["split"] = name
         preds.append(all_preds)
@@ -98,7 +99,7 @@ if __name__ == "__main__":
     opt, str_opt = parse_args()
     print(str_opt)
     cpu = False if opt.model == "path" else True
-    accelerator = Accelerator(cpu=cpu)
+    accelerator = Accelerator(cpu=False, step_scheduler_with_optimizer=False)
     device = accelerator.device
     print(f"Device: {device}")
     opt.device = device
@@ -116,7 +117,7 @@ if __name__ == "__main__":
         group = f"{opt.task}_{opt.model}{rna}_{opt.mil}"
     print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
     for k in range(1, opt.folds + 1):
-        if not opt.overwrite and os.path.exists(f"{opt.ckpt_dir}/{opt.model}_{k}.pt"):
+        if opt.resume and os.path.exists(f"{opt.ckpt_dir}/{opt.model}_{k}.pt"):
             print(f"Skipping split {k}")
             continue
         opt.k = k
@@ -144,7 +145,7 @@ if __name__ == "__main__":
         metrics_list.append(metrics[1][2:])
         utils.save_model(model, opt, preds) if not opt.dry_run else None
 
-    rtable = utils.make_results_table(metrics_list, opt.folds)
+    rtable = utils.make_results_table(metrics_list)
     print(rtable)
 
     if not opt.dry_run:

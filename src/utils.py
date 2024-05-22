@@ -7,6 +7,8 @@ import torch.optim.lr_scheduler as lr_scheduler
 import os
 from tabulate import tabulate
 import wandb
+import torch.nn as nn
+
 
 # from line_profiler import profile
 
@@ -14,30 +16,37 @@ import wandb
 
 
 # Predictions are not independent in Coxloss, ie calculating over batch != whole dataset
-def loss_fn(model, grade, time, event, grade_pred, hazard_pred, opt):
-    w_nll = 0 if opt.task == "surv" else 1
-    w_cox = 0 if opt.task == "grad" else 1
-    return (
-        w_nll * F.nll_loss(grade_pred, grade)
-        + opt.l1 * l1_reg(model)
-        + w_cox * CoxLoss(time, event, hazard_pred)
-    )
+class PathomicLoss(nn.Module):
+    def __init__(self, opt):
+        super().__init__()
+        self.w_nll = 0 if opt.task == "surv" else 1
+        self.w_cox = 0 if opt.task == "grad" else 1
+        self.w_l1 = opt.l1
 
+    @staticmethod
+    def l1_reg(model):
+        # We only regularise the omic_net
+        if hasattr(model, "omic_net"):
+            return sum(torch.abs(W).sum() for W in model.omic_net.parameters())
+        else:
+            # If no omic_net, assume opt.l1 set to 0
+            return sum(torch.abs(W).sum() for W in model.parameters())
 
-def CoxLoss(survtime, event, hazard_pred):
-    R_mat = (survtime.repeat(len(survtime), 1) >= survtime.unsqueeze(1)).int()
-    theta = hazard_pred.view(-1)
-    exp_theta = theta.exp()
-    loss_cox = -torch.mean((theta - (exp_theta * R_mat).sum(dim=1).log()) * event)
-    return loss_cox
+    @staticmethod
+    def cox_loss(survtime, event, hazard_pred):
+        R_mat = (survtime.repeat(len(survtime), 1) >= survtime.unsqueeze(1)).int()
+        theta = hazard_pred.view(-1)
+        exp_theta = theta.exp()
+        loss_cox = -torch.mean((theta - (exp_theta * R_mat).sum(dim=1).log()) * event)
+        return loss_cox
 
+    def forward(self, model, grade, time, event, grade_pred, hazard_pred):
+        nll_loss = F.nll_loss(grade_pred, grade)
+        l1_loss = self.l1_reg(model)
+        cox_loss = self.cox_loss(time, event, hazard_pred)
 
-def l1_reg(model):
-    # We only regularise the omic_net
-    if hasattr(model, "omic_net"):
-        return sum(torch.abs(W).sum() for W in model.omic_net.parameters())
-    else:
-        return sum(torch.abs(W).sum() for W in model.parameters())
+        total_loss = self.w_nll * nll_loss + self.w_l1 * l1_loss + self.w_cox * cox_loss
+        return total_loss
 
 
 def define_scheduler(opt, optimizer):
@@ -67,11 +76,11 @@ def save_model(model, opt, preds):
     )
 
 
-def make_results_table(metrics_list, folds):
+def make_results_table(metrics_list):
     df = pd.DataFrame(
         metrics_list,
         columns=["Accuracy", "AUC", "C-Index"],
-        index=range(1, folds + 1),
+        index=range(1, len(metrics_list) + 1),
     )
     df.index.name = "Fold"
     df = df.loc[:, (df != 0).any(axis=0)]
@@ -80,11 +89,11 @@ def make_results_table(metrics_list, folds):
     return tabulate(df.T, headers="keys", tablefmt="rounded_grid", floatfmt=".3f")
 
 
-def log_epoch(epoch, model, train_loader, test_loader, opt, train_loss, all_preds):
+def log_epoch(epoch, model, train_loader, test_loader, loss_fn, opt, train_loss, all_preds):
     _, train_acc, train_auc, c_train = evaluate(
-        model, train_loader, opt, pd.DataFrame(all_preds)
+        model, train_loader, loss_fn, opt, pd.DataFrame(all_preds)
     )
-    test_loss, test_acc, test_auc, c_test = evaluate(model, test_loader, opt)
+    test_loss, test_acc, test_auc, c_test = evaluate(model, test_loader, loss_fn, opt)
     desc = f"Epoch {epoch} (train/test) | Loss: {train_loss:.2f}/{test_loss:.2f} | "
     wandb.log({"train_loss": train_loss, "test_loss": test_loss})
     if opt.task != "surv":
@@ -92,7 +101,7 @@ def log_epoch(epoch, model, train_loader, test_loader, opt, train_loss, all_pred
         desc += f"AUC: {train_auc:.2f}/{test_auc:.2f} | "
         wandb.log(
             {
-                "train_acc": train_acc,
+                "train_acc": train_acc, 
                 "test_acc": test_acc,
                 "train_auc": train_auc,
                 "test_auc": test_auc,
@@ -143,7 +152,7 @@ def get_all_preds(model, data_loader):
 
 
 @torch.no_grad()
-def evaluate(model, data_loader, opt, precomp=None, return_preds=False):
+def evaluate(model, data_loader, loss_fn, opt, precomp=None, return_preds=False):
     """Computes all metrics for a given model and dataset."""
 
     all_preds = get_all_preds(model, data_loader) if precomp is None else precomp
@@ -193,7 +202,7 @@ def evaluate(model, data_loader, opt, precomp=None, return_preds=False):
             )
             for key in ["grade", "time", "event", grade_logits, "hazard_pred"]
         ]
-        loss = loss_fn(model, *loss_inputs, opt).item()
+        loss = loss_fn(model, *loss_inputs).item()
 
     if return_preds:
         return loss, accuracy, auc, c_indx, all_preds

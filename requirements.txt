@@ -6,5 +6,6 @@ scikit_learn
 tabulate
 torch
 torch_geometric
+torchvision
 tqdm
 wandb

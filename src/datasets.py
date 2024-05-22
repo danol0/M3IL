@@ -85,7 +85,6 @@ class instanceLevelDataset(Dataset):
         event, time, grade = [
             torch.tensor(self.data[pat]["y"][k], dtype=torch.long) for k in range(3)
         ]
-
         return (omic, path, graph, event, time, grade, pat)
 
     def __len__(self):
@@ -127,7 +126,8 @@ class patientLevelDataset(Dataset):
 
 # --- Collate functions ---
 def define_collate_fn(opt):
-    if opt.mil in ("instance", "paper"):
+    # Only path requires collating
+    if opt.mil in ("instance", "paper") or 'path' not in opt.model:
         return lambda batch: mixed_collate(batch, opt.device)
     else:
         if opt.collate == "min":
@@ -139,6 +139,7 @@ def define_collate_fn(opt):
 
 
 def mixed_collate(batch, device):
+    """Collates the pathgraphomic dataset"""
     collated_batch = (
         (
             prepare_graph_batch(samples, device)
@@ -148,20 +149,16 @@ def mixed_collate(batch, device):
         for samples in zip(*batch)
     )
 
-    collated_batch = tuple(
+    return tuple(
         data.to(device) if isinstance(data, torch.Tensor) else data
         for data in collated_batch
     )
-    return collated_batch
 
 
 def prepare_graph_batch(graph, device):
-    n_graphs = torch.Tensor([0])
-    # Handle case when passing an empty tensor
-    if not isinstance(graph[0], torch.Tensor):
-        n_graphs = torch.Tensor([len(g.ptr) - 1 for g in graph]).long().to(device)
-        graph = Batch.from_data_list(graph).to(device)
-    return graph, n_graphs
+    pat_idxs = torch.repeat_interleave(torch.arange(len(graph)), torch.tensor([len(g.ptr) - 1 for g in graph]))
+    graph = Batch.from_data_list(graph)
+    return graph.to(device), pat_idxs.to(device)
 
 
 def select_min(batch, device):
