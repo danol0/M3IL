@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 def define_fusion(opt):
-    """Defines bimodal fusion as described in the paper."""
+    """Defines tensor fusion as described in the paper."""
 
     gate_path = (
         0 if opt.task == "grad" and opt.model in ("pathomic", "pathgraphomic") else 1
@@ -21,7 +21,7 @@ def define_fusion(opt):
     )
 
     if opt.model == "pathomic":
-        return BilinearFusion(
+        return Bimodal(
             device=opt.device,
             gate1=gate_path,
             gate2=gate_omic,
@@ -31,7 +31,7 @@ def define_fusion(opt):
             dropout=opt.dropout,
         )
     elif opt.model == "graphomic":
-        return BilinearFusion(
+        return Bimodal(
             device=opt.device,
             gate1=gate_graph,
             gate2=gate_omic,
@@ -41,12 +41,13 @@ def define_fusion(opt):
             dropout=opt.dropout,
         )
     elif opt.model == "pathgraphomic":
-        return TrilinearFusion(
+        return Trimodal(
             device=opt.device,
-            type_A=1 if opt.task == "surv" else 0,
+            gate_graph_with_omic=1 if opt.task == "surv" else 0,
             gate_path=gate_path,
             gate_graph=gate_graph,
             gate_omic=gate_omic,
+            feature_dim=32,
             path_scale=path_scale,
             graph_scale=graph_scale,
             omic_scale=omic_scale,
@@ -56,27 +57,69 @@ def define_fusion(opt):
         raise NotImplementedError(f"Fusion for {opt.model} not implemented")
 
 
-class TrilinearFusion(nn.Module):
+class TensorFusion(nn.Module):
+    def __init__(self, device, feature_dim, dropout=0.25):
+        """Base class for bimodal and trimodal tensor fusion."""
+
+        super().__init__()
+        self.device = device
+        self.feature_dim = feature_dim
+        self.dropout = dropout
+        self.sigmoid = nn.Sigmoid()
+
+    def _tensor_fusion(self, tensors):
+        fused = tensors[0]
+        for t in tensors[1:]:
+            fused = torch.bmm(fused.unsqueeze(2), t.unsqueeze(1)).flatten(start_dim=1)
+        return fused
+
+    def _create_gate_layers(self, feature_dim, scaled_dim, dropout):
+        rescale_layer = nn.Sequential(nn.Linear(feature_dim, scaled_dim), nn.ReLU())
+        gate_weight_layer = nn.Bilinear(feature_dim, feature_dim, scaled_dim)
+        out_layer = nn.Sequential(
+            nn.Linear(scaled_dim, scaled_dim), nn.ReLU(), nn.Dropout(p=dropout)
+        )
+        return rescale_layer, gate_weight_layer, out_layer
+
+    def _rescale_and_gate(self, x, x_gate, rescale_layer, gate_layer, out_layer, gate):
+        """NOTE: Gating behaviour has been changed from the paper.
+        Specifically, the paper does not apply the rescaling layer if the gate is off.
+        This would result in an error if a mode is rescaled but not gated, as the out layer
+        would expect the rescaled input. This implementation applies the rescaling layer
+        regardless of the gate state."""
+
+        o = rescale_layer(x)
+        w = self.sigmoid(gate_layer(x, x_gate)) if gate else 1
+        o = out_layer(w * o)
+        return o
+
+    def _append_one(self, o):
+        return torch.cat(
+            (o, torch.FloatTensor(o.shape[0], 1).fill_(1).to(self.device)), 1
+        )
+
+
+class Trimodal(TensorFusion):
     def __init__(
         self,
         device,
-        type_A=1,
+        gate_graph_with_omic=1,
         gate_path=1,
         gate_graph=1,
         gate_omic=1,
+        feature_dim=32,
         path_scale=1,
         graph_scale=1,
         omic_scale=1,
         dropout=0.25,
     ):
-        super().__init__()
+        super().__init__(device, feature_dim, dropout)
         mmhid = 64
-        feature_dim = 32
         self.gate_path = gate_path
         self.gate_graph = gate_graph
         self.gate_omic = gate_omic
         self.device = device
-        self.type_A = type_A
+        self.gate_graph_with_omic = gate_graph_with_omic
 
         path_scaled, graph_scaled, omic_scaled = (
             feature_dim // path_scale,
@@ -94,7 +137,7 @@ class TrilinearFusion(nn.Module):
             self._create_gate_layers(feature_dim, omic_scaled, dropout)
         )
 
-        self.post_fusion_dropout = nn.Dropout(p=0.25)
+        self.post_fusion_dropout = nn.Dropout(p=dropout)
         self.encoder = nn.Sequential(
             nn.Linear(
                 (path_scaled + 1) * (graph_scaled + 1) * (omic_scaled + 1), mmhid
@@ -105,16 +148,6 @@ class TrilinearFusion(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=dropout),
         )
-
-        self.sigmoid = nn.Sigmoid()
-
-    def _create_gate_layers(self, feature_dim, scaled_dim, dropout):
-        rescale_layer = nn.Sequential(nn.Linear(feature_dim, scaled_dim), nn.ReLU())
-        gate_weight_layer = nn.Bilinear(feature_dim, feature_dim, scaled_dim)
-        out_layer = nn.Sequential(
-            nn.Linear(scaled_dim, scaled_dim), nn.ReLU(), nn.Dropout(p=dropout)
-        )
-        return rescale_layer, gate_weight_layer, out_layer
 
     def forward(self, x_path, x_graph, x_omic):
         o1 = self._rescale_and_gate(
@@ -127,7 +160,7 @@ class TrilinearFusion(nn.Module):
         )
         o2 = self._rescale_and_gate(
             x_graph,
-            x_omic if self.type_A else x_path,
+            x_omic if self.gate_graph_with_omic else x_path,
             self.graph_rescale,
             self.graph_gate_weight,
             self.graph_gated,
@@ -146,25 +179,13 @@ class TrilinearFusion(nn.Module):
         o1 = self._append_one(o1)
         o2 = self._append_one(o2)
         o3 = self._append_one(o3)
-        o12 = torch.bmm(o1.unsqueeze(2), o2.unsqueeze(1)).flatten(start_dim=1)
-        o123 = torch.bmm(o12.unsqueeze(2), o3.unsqueeze(1)).flatten(start_dim=1)
-        out = self.post_fusion_dropout(o123)
+        fused = self._tensor_fusion([o1, o2, o3])
+        out = self.post_fusion_dropout(fused)
         out = self.encoder(out)
         return out
 
-    def _rescale_and_gate(self, x, x_gate, rescale_layer, gate_layer, out_layer, gate):
-        o = rescale_layer(x)
-        w = self.sigmoid(gate_layer(x, x_gate)) if gate else 1
-        o = out_layer(w * o)
-        return o
 
-    def _append_one(self, o):
-        return torch.cat(
-            (o, torch.FloatTensor(o.shape[0], 1).fill_(1).to(self.device)), 1
-        )
-
-
-class BilinearFusion(nn.Module):
+class Bimodal(TensorFusion):
     def __init__(
         self,
         device,
@@ -175,7 +196,7 @@ class BilinearFusion(nn.Module):
         scale_dim2=1,
         dropout=0.25,
     ):
-        super().__init__()
+        super().__init__(device, feature_dim, dropout)
         self.gate1 = gate1
         self.gate2 = gate2
         self.device = device
@@ -191,24 +212,14 @@ class BilinearFusion(nn.Module):
         )
 
         self.post_fusion_dropout = nn.Dropout(p=dropout)
-        self.encoder1 = nn.Sequential(
+        self.encoder = nn.Sequential(
             nn.Linear((dim1_scaled + 1) * (dim2_scaled + 1), mmhid),
             nn.ReLU(),
             nn.Dropout(p=dropout),
+            nn.Linear(mmhid, mmhid),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
         )
-        self.encoder2 = nn.Sequential(
-            nn.Linear(mmhid, mmhid), nn.ReLU(), nn.Dropout(p=dropout)
-        )
-
-        self.sigmoid = nn.Sigmoid()
-
-    def _create_gate_layers(self, feature_dim, scaled_dim, dropout):
-        rescale_layer = nn.Sequential(nn.Linear(feature_dim, scaled_dim), nn.ReLU())
-        gate_weight_layer = nn.Bilinear(feature_dim, feature_dim, scaled_dim)
-        out_layer = nn.Sequential(
-            nn.Linear(scaled_dim, scaled_dim), nn.ReLU(), nn.Dropout(p=dropout)
-        )
-        return rescale_layer, gate_weight_layer, out_layer
 
     def forward(self, vec1, vec2):
         o1 = self._rescale_and_gate(
@@ -232,20 +243,7 @@ class BilinearFusion(nn.Module):
         # Fusion
         o1 = self._append_one(o1)
         o2 = self._append_one(o2)
-        o12 = torch.bmm(o1.unsqueeze(2), o2.unsqueeze(1)).flatten(start_dim=1)
-        out = self.post_fusion_dropout(o12)
-        out = self.encoder1(out)
-        out = self.encoder2(out)
-
+        fused = self._tensor_fusion([o1, o2])
+        out = self.post_fusion_dropout(fused)
+        out = self.encoder(out)
         return out
-
-    def _rescale_and_gate(self, x, x_gate, rescale_layer, gate_layer, out_layer, gate):
-        o = rescale_layer(x)
-        w = self.sigmoid(gate_layer(x, x_gate)) if gate else 1
-        o = out_layer(w * o)
-        return o
-
-    def _append_one(self, o):
-        return torch.cat(
-            (o, torch.FloatTensor(o.shape[0], 1).fill_(1).to(self.device)), 1
-        )
