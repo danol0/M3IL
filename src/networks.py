@@ -217,7 +217,7 @@ class GraphNet(torch.nn.Module):
             data.edge_attr,
             data.batch,
         )
-        batch = torch.repeat_interleave(pat_idxs, torch.bincount(batch))
+        # batch = torch.repeat_interleave(pat_idxs, torch.bincount(batch))
         xs = []
         for conv, pool in zip(self.convs, self.pools):
             x = F.relu(conv(x, edge_index))
@@ -227,6 +227,8 @@ class GraphNet(torch.nn.Module):
             xs.append(torch.cat([gmp(x, batch), gap(x, batch)], dim=1))
 
         x = torch.sum(torch.stack(xs), dim=0)
+
+        x = gap(x, pat_idxs)
 
         x = F.relu(self.lin1(x))
         x = F.dropout(x, p=self.dropout)
