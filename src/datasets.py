@@ -1,15 +1,16 @@
-import torch
-from torch.utils.data.dataset import Dataset
+import os
+import pickle
+from collections import defaultdict
+
 import numpy as np
 import pandas as pd
-import pickle
-from sklearn.preprocessing import StandardScaler
-from collections import defaultdict
-import os
-from torch_geometric.data import Batch
-from torch.utils.data.dataloader import default_collate
-from torchvision import transforms
+import torch
 from PIL import Image
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data.dataloader import default_collate
+from torch.utils.data.dataset import Dataset
+from torch_geometric.data import Batch
+from torchvision import transforms
 
 
 def define_dataset(opt):
@@ -45,7 +46,7 @@ class instanceLevelDataset(Dataset):
         self.model = opt.model
         self.data = data[split]
         self.vgg = opt.use_vgg
-        self.transform = None if self.vgg else get_transforms()
+        self.transform = get_transforms()
 
         combinations = []
         for pat in self.data.keys():
@@ -98,6 +99,8 @@ class patientLevelDataset(Dataset):
         self.model = opt.model
         self.data = data[split]
         self.patnames = list(self.data.keys())
+        self.vgg = opt.use_vgg
+        self.transform = get_transforms()
 
     def __getitem__(self, idx):
         pname = self.patnames[idx]
@@ -108,8 +111,13 @@ class patientLevelDataset(Dataset):
             omic = torch.tensor(self.data[pname]["x_omic"], dtype=torch.float32)
 
         if "path" in self.model:
-            path = self.data[pname]["x_path"]
-            path = torch.tensor(path, dtype=torch.float32).squeeze(1)
+            if self.vgg:
+                path = self.data[pname]["x_path"]
+                path = torch.tensor(path, dtype=torch.float32).squeeze(1)
+            else:
+                raise NotImplementedError("Path not implemented at patient level")
+                path = [Image.open(p) for p in self.data[pname]["x_path"]]
+                path = torch.stack([self.transform(p.convert("RGB")) for p in path])
 
         if "graph" in self.model:
             graph = [torch.load(g) for g in self.data[pname]["x_graph"]]
@@ -127,7 +135,7 @@ class patientLevelDataset(Dataset):
 # --- Collate functions ---
 def define_collate_fn(opt):
     # Only path requires collating
-    if opt.mil in ("instance", "paper") or 'path' not in opt.model:
+    if opt.mil in ("instance", "paper") or "path" not in opt.model:
         return lambda batch: mixed_collate(batch, opt.device)
     else:
         if opt.collate == "min":
@@ -156,7 +164,9 @@ def mixed_collate(batch, device):
 
 
 def prepare_graph_batch(graph, device):
-    pat_idxs = torch.repeat_interleave(torch.arange(len(graph)), torch.tensor([len(g.ptr) - 1 for g in graph]))
+    pat_idxs = torch.repeat_interleave(
+        torch.arange(len(graph)), torch.tensor([len(g.ptr) - 1 for g in graph])
+    )
     graph = Batch.from_data_list(graph)
     return graph.to(device), pat_idxs.to(device)
 
@@ -177,7 +187,8 @@ def select_min(batch, device):
 def pad2max(batch, device):
     omic, path, graph, event, time, grade, pname = zip(*batch)
 
-    # find max number of images
+    # Find max number of images
+    print(type(path[0]))
     max_imgs = max([img.size(0) for img in path])
     # 0 pad
     path = [
@@ -191,12 +202,10 @@ def pad2max(batch, device):
 # --- Data loading ---
 def get_splits(opt):
     data_dir = opt.data_dir
-    rmomics = 1 if "omic" in opt.model else 0
-    rmgrade = 1 if opt.task in ["multi", "grad"] else 0
     labels, dataset = get_all_dataset(
         use_rnaseq=opt.rna,
-        rm_missing_omics=rmomics,
-        rm_missing_grade=rmgrade,
+        rm_missing_omics=1 if "omic" in opt.model else 0,
+        rm_missing_grade=1 if opt.task in ["multi", "grad"] else 0,
         data_dir=data_dir,
     )
     split_data = {}

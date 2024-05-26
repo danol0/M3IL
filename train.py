@@ -1,18 +1,18 @@
 import os
+
 import numpy as np
 import pandas as pd
+import torch
+from accelerate import Accelerator
 from tabulate import tabulate
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import torch
-from torch.utils.data import DataLoader
-from accelerate import Accelerator
+import src.utils as utils
 import wandb
-
-from src.datasets import define_dataset, get_splits, define_collate_fn
+from src.datasets import define_collate_fn, define_dataset, get_splits
 from src.networks import define_model
 from src.options import parse_args
-import src.utils as utils
 
 # from line_profiler import profile
 # from torch.profiler import profile, record_function, ProfilerActivity
@@ -24,14 +24,16 @@ np.random.seed(2019)
 def train(model, split_data, accelerator, opt):
     train_loader, test_loader = (
         DataLoader(
-            define_dataset(opt)(split_data, s, opt),
+            define_dataset(opt)(split_data, split, opt),
             batch_size=opt.batch_size,
             shuffle=True,
             collate_fn=define_collate_fn(opt),
         )
-        for s in ["train", "test"]
+        for split in ["train", "test"]
     )
-    print(f"{len(train_loader.dataset)} train samples | {len(train_loader) * opt.n_epochs} gradient steps")
+    print(
+        f"{len(train_loader.dataset)} train samples | {len(train_loader) * opt.n_epochs} gradient steps"
+    )
 
     optim = torch.optim.Adam(
         model.parameters(), betas=(opt.adam_b1, 0.999), lr=opt.lr, weight_decay=opt.l2
@@ -57,7 +59,7 @@ def train(model, split_data, accelerator, opt):
                 model.graph_net.freeze(False)
 
         for omic, path, graph, event, time, grade, patname in train_loader:
-            # --- Forward pass ---
+            # --- Training Step ---
             optim.zero_grad()
             _, grade_pred, hazard_pred = model(x_omic=omic, x_path=path, x_graph=graph)
             loss = loss_fn(model, grade, time, event, grade_pred, hazard_pred)
@@ -99,7 +101,7 @@ if __name__ == "__main__":
     opt, str_opt = parse_args()
     print(str_opt)
     cpu = False if opt.model == "path" else True
-    accelerator = Accelerator(cpu=False, step_scheduler_with_optimizer=False)
+    accelerator = Accelerator(cpu=cpu, step_scheduler_with_optimizer=False)
     device = accelerator.device
     print(f"Device: {device}")
     opt.device = device
@@ -108,13 +110,14 @@ if __name__ == "__main__":
     split_data = get_splits(opt)
     metrics_list = []
     rna = "_rna" if (opt.rna and "omic" in opt.model) else ""
+    attn = "_attn" if opt.attn_pool else ""
     # Ignore MIL for omic as there is only 1 instance per patient
     if opt.model == "omic":
         opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}"
         group = f"{opt.task}_{opt.model}{rna}"
     else:
-        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}_{opt.mil}"
-        group = f"{opt.task}_{opt.model}{rna}_{opt.mil}"
+        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}_{opt.mil}{attn}"
+        group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{attn}"
     print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
     for k in range(1, opt.folds + 1):
         if opt.resume and os.path.exists(f"{opt.ckpt_dir}/{opt.model}_{k}.pt"):

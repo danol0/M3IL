@@ -1,13 +1,16 @@
 import torch
 import torch.nn as nn
-from torch.nn import Parameter
-from torch_geometric.nn import SAGEConv, SAGPooling
-from torch_geometric.nn.aggr import MeanAggregation
-from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 from torch.hub import load_state_dict_from_url
+from torch.nn import Parameter
 from torch.nn import functional as F
+from torch_geometric.nn import SAGEConv, SAGPooling
+from torch_geometric.nn import global_max_pool as gmp
+from torch_geometric.nn import global_mean_pool as gap
+from torch_geometric.nn.aggr import MeanAggregation
+from torch_geometric.utils import scatter, softmax
+
 from src.fusion import define_fusion
-from torch_geometric.utils import softmax, scatter
+from src.utils import print_load
 
 
 # --- Utility ---
@@ -16,9 +19,9 @@ def define_model(opt):
     if opt.model == "omic":
         model = FFN(input_dim=omic_dim, omic_dim=32, dropout=opt.dropout)
     elif opt.model == "graph":
-        model = GraphNet(dropout=opt.dropout)
+        model = GraphNet(dropout=opt.dropout, attn_pool=opt.attn_pool)
     elif opt.model == "path":
-        model = get_vgg()
+        model = get_vgg19(opt)
     elif opt.model == "pathomic":
         model = PathomicNet(opt, omic_xdim=omic_dim)
     elif opt.model == "graphomic":
@@ -45,11 +48,66 @@ def dfs_freeze(model, freeze):
         dfs_freeze(child, freeze)
 
 
+# --- MIL ---
+
+
+class AttentionAggregation(nn.Module):
+    """Source: https://github.com/mahmoodlab/CLAM/blob/master/models/model_clam.py"""
+
+    def __init__(self, features=32, hidden=32, dropout=0.25):
+        super().__init__()
+        self.a = nn.Sequential(
+            nn.Linear(features, hidden), nn.Sigmoid(), nn.Dropout(dropout)
+        )
+        self.b = nn.Sequential(
+            nn.Linear(features, hidden), nn.Tanh(), nn.Dropout(dropout)
+        )
+        self.c = nn.Linear(hidden, 1)
+
+    def forward(self, x):
+        a = self.a(x)
+        b = self.b(x)
+        A = a.mul(b)
+        A = self.c(A)
+        pad = torch.all(x == 0, dim=-1)
+        A[pad] = -float("Inf")
+        A = F.softmax(A, dim=1)
+        return torch.sum(A * x, dim=1)
+
+
+class GlobalAttentionPool(torch.nn.Module):
+    """Attention pooling for graphs.
+    Source: https://pytorch-geometric.readthedocs.io/en/1.3.1/_modules/torch_geometric/nn/glob/attention.html
+    """
+
+    def __init__(self, features=32, hidden=16, dropout=0.25):
+        super().__init__()
+        self.a = nn.Sequential(
+            nn.Linear(features, hidden), nn.Sigmoid(), nn.Dropout(dropout)
+        )
+        self.b = nn.Sequential(
+            nn.Linear(features, hidden), nn.Tanh(), nn.Dropout(dropout)
+        )
+        self.c = nn.Linear(hidden, 1)
+
+    def forward(self, x, batch, size=None):
+        x = x.unsqueeze(-1) if x.dim() == 1 else x
+        size = batch[-1].item() + 1 if size is None else size
+        a = self.a(x)
+        b = self.b(x)
+        A = a.mul(b)
+        A = self.c(A).view(-1, 1)
+        A = softmax(A, batch, size)
+        assert A.dim() == x.dim() and A.size(0) == x.size(0)
+        out = scatter(src=(A * x), index=batch, reduce="add", dim_size=size)
+        return out
+
+
 # --- Path ---
 class PathNet(nn.Module):
-    def __init__(self, features, path_dim=32):
-        super(PathNet, self).__init__()
-        self.conv_layers = features
+    def __init__(self, vgg_layers, opt, path_dim=32):
+        super().__init__()
+        self.conv_layers = vgg_layers
         # self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
         # Avgpool for MPS compatibility
         self.avgpool = nn.AvgPool2d(kernel_size=3, stride=2)
@@ -66,6 +124,14 @@ class PathNet(nn.Module):
             nn.Dropout(0.05),
         )
 
+        self.bagged = 1 if opt.mil == "pat" else 0
+        if opt.attn_pool == 1:
+            self.aggregate = AttentionAggregation(
+                features=path_dim, hidden=16, dropout=0.25
+            )
+        else:
+            self.aggregate = self.mean_aggregation
+
         self.grade_clf = nn.Sequential(nn.Linear(path_dim, 3), nn.LogSoftmax(dim=1))
         self.hazard_clf = nn.Sequential(nn.Linear(path_dim, 1), nn.Sigmoid())
 
@@ -74,12 +140,19 @@ class PathNet(nn.Module):
 
         dfs_freeze(self.conv_layers, freeze=True)
 
+    @staticmethod
+    def mean_aggregation(x):
+        mask = torch.any(x != 0, dim=-1)
+        return x.sum(dim=1) / mask.sum(dim=1, keepdim=True)
+
     def forward(self, **kwargs):
         x = kwargs["x_path"]
         x = self.conv_layers(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         features = self.classifier(x)
+        if self.bagged:
+            features = self.aggregate(features)
         grade = self.grade_clf(features)
         hazard = self.hazard_clf(features) * self.output_range + self.output_shift
         return features, grade, hazard
@@ -98,20 +171,22 @@ def make_layers(cfg):
     return nn.Sequential(*layers)
 
 
-def get_vgg(**kwargs):
+def get_vgg19(opt):
     cfg = [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M']
-    model = PathNet(make_layers(cfg), **kwargs)
+    model = PathNet(make_layers(cfg), opt, path_dim=32)
 
     pretrained_dict = load_state_dict_from_url(
         "https://download.pytorch.org/models/vgg19_bn-c79401a0.pth", progress=True
     )
 
     for key in list(pretrained_dict.keys()):
-        if 'classifier' in key:
+        if "classifier" in key:
             pretrained_dict.pop(key)
+        if key.startswith("features."):
+            pretrained_dict[key[9:]] = pretrained_dict.pop(key)
 
-    model.load_state_dict(pretrained_dict, strict=False)
     print("Initializing Path Weights")
+    model.conv_layers.load_state_dict(pretrained_dict, strict=True)
 
     return model
 
@@ -152,29 +227,8 @@ class FFN(nn.Module):
 
 
 # --- Graph ---
-class GatedAttentionPool(torch.nn.Module):
-    def __init__(self, features=32):
-        super().__init__()
-        self.gate_nn = nn.Sequential(*[nn.Linear(features, 1), nn.Sigmoid()])
-        self.nn = None
-        # self.nn = nn.Sequential(*[nn.Linear(features, features), nn.Tanh()])
-
-    def forward(self, x, batch, size=None):
-        x = x.unsqueeze(-1) if x.dim() == 1 else x
-        size = batch[-1].item() + 1 if size is None else size
-
-        gate = self.gate_nn(x).view(-1, 1)
-        x = self.nn(x) if self.nn is not None else x
-        assert gate.dim() == x.dim() and gate.size(0) == x.size(0)
-
-        gate = softmax(gate, batch, size)
-        out = scatter(src=(gate * x), index=batch, reduce='add', dim_size=size)
-
-        return out
-
-
 class GraphNet(torch.nn.Module):
-    def __init__(self, dropout=0.25):
+    def __init__(self, dropout=0.25, attn_pool=False):
         super().__init__()
 
         features = 1036
@@ -192,15 +246,20 @@ class GraphNet(torch.nn.Module):
         self.pools = torch.nn.ModuleList(
             [SAGPooling(nhid, ratio=pooling_ratio) for _ in range(len(hidden))]
         )
-        # self.attn_aggregators = torch.nn.ModuleList(
-        #     [GatedAttentionPool(features=nhid) for _ in range(len(hidden))]
-        # )
 
-        self.instance_aggr = MeanAggregation()
-        self.attn_aggr = GatedAttentionPool(features=nhid)
+        self.encoder = nn.Sequential(
+            torch.nn.Linear(nhid * 2, nhid),
+            nn.ReLU(True),
+            nn.Dropout(p=dropout),
+            torch.nn.Linear(nhid, graph_dim),
+            nn.ReLU(True),
+        )
 
-        self.lin1 = torch.nn.Linear(nhid * 2, nhid)
-        self.lin2 = torch.nn.Linear(nhid, graph_dim)
+        self.aggregate = (
+            GlobalAttentionPool(features=graph_dim, hidden=16, dropout=dropout)
+            if attn_pool
+            else MeanAggregation()
+        )
 
         self.grade_clf = nn.Sequential(nn.Linear(graph_dim, 3), nn.LogSoftmax(dim=1))
         self.hazard_clf = nn.Sequential(nn.Linear(graph_dim, 1), nn.Sigmoid())
@@ -217,7 +276,6 @@ class GraphNet(torch.nn.Module):
             data.edge_attr,
             data.batch,
         )
-        # batch = torch.repeat_interleave(pat_idxs, torch.bincount(batch))
         xs = []
         for conv, pool in zip(self.convs, self.pools):
             x = F.relu(conv(x, edge_index))
@@ -227,18 +285,10 @@ class GraphNet(torch.nn.Module):
             xs.append(torch.cat([gmp(x, batch), gap(x, batch)], dim=1))
 
         x = torch.sum(torch.stack(xs), dim=0)
-
-        x = gap(x, pat_idxs)
-
-        x = F.relu(self.lin1(x))
-        x = F.dropout(x, p=self.dropout)
-
-        # The result is a single feature vector for each patient that aggregates all the graphs
-        features = F.relu(self.lin2(x))
-
+        x = self.encoder(x)
+        features = self.aggregate(x, pat_idxs)
         grade = self.grade_clf(features)
         hazard = self.hazard_clf(features) * self.output_range + self.output_shift
-
         return features, grade, hazard
 
     def freeze(self, freeze):
@@ -255,59 +305,6 @@ class GraphNet(torch.nn.Module):
         return data
 
 
-class AttentionAggregation(nn.Module):
-    def __init__(self, L=32, D=256, dropout=False):
-        super(AttentionAggregation, self).__init__()
-        self.attention_a = [nn.Linear(L, D), nn.Tanh()]
-
-        self.attention_b = [nn.Linear(L, D), nn.Sigmoid()]
-
-        if dropout:
-            self.attention_a.append(nn.Dropout(0.25))
-            self.attention_b.append(nn.Dropout(0.25))
-
-        self.attention_a = nn.Sequential(*self.attention_a)
-        self.attention_b = nn.Sequential(*self.attention_b)
-
-        self.attention_c = nn.Linear(D, 1)
-
-    def forward(self, x):
-        # batch_size, n, L = x.size()
-
-        # Compute attention scores
-        a = self.attention_a(x)  # shape: (batch, n, D)
-        b = self.attention_b(x)  # shape: (batch, n, D)
-        A = a.mul(b)
-        A = self.attention_c(A)  # shape: (batch, n, 1)
-        A = F.softmax(A, dim=1)
-        return A
-
-
-# class AttentionAggregation(nn.Module):
-#     def __init__(self, input_dim=32, hidden_dim=64):
-#         super().__init__()
-#         # Define the layers for attention mechanism
-#         self.attention_a = nn.Linear(input_dim, hidden_dim)
-#         self.attention_b = nn.Linear(input_dim, hidden_dim)
-#         self.attention_c = nn.Linear(hidden_dim, 1)
-
-#     def forward(self, x):
-#         # x: [batch_size, n, input_dim]
-#         # batch_size, n, input_dim = x.size()
-
-#         # Compute attention scores
-#         a = torch.tanh(self.attention_a(x))  # [batch_size, n, hidden_dim]
-#         b = torch.sigmoid(self.attention_b(x))  # [batch_size, n, hidden_dim]
-
-#         attention_weights = self.attention_c(a * b).squeeze(-1)  # [batch_size, n]
-#         attention_weights = F.softmax(attention_weights, dim=1)  # [batch_size, n]
-
-#         # Compute the weighted sum of the instances
-#         weighted_sum = torch.bmm(attention_weights.unsqueeze(1), x).squeeze(1)  # [batch_size, input_dim]
-
-#         return weighted_sum
-
-
 # --- FUSION ---
 class PathomicNet(nn.Module):
     def __init__(self, opt, omic_xdim=80):
@@ -320,17 +317,17 @@ class PathomicNet(nn.Module):
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
         )
         rna = "_rna" if opt.rna else ""
-        ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
         self.omic_net.load_state_dict(ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
 
-        # TODO: learned/flexible aggregation
         self.bagged = 1 if opt.mil == "pat" else 0
-        self.attn_pool = 0
-        # Attention based pooling
-        if opt.pool == "attn":
-            self.attention = AttentionAggregation(L=feature_dim, D=128, dropout=True)
-            self.attn_pool = 1
+        if opt.attn_pool == 1:
+            self.aggregate = AttentionAggregation(
+                features=feature_dim, hidden=16, dropout=0.25
+            )
+        else:
+            self.aggregate = self.mean_aggregation
 
         self.fusion = define_fusion(opt)
         self.grade_clf = nn.Sequential(nn.Linear(mmhid, 3), nn.LogSoftmax(dim=1))
@@ -341,21 +338,19 @@ class PathomicNet(nn.Module):
 
         self.omic_net.freeze(True)
 
+    @staticmethod
+    def mean_aggregation(x):
+        mask = torch.any(x != 0, dim=-1)
+        return x.sum(dim=1) / mask.sum(dim=1, keepdim=True)
+
     def forward(self, **kwargs):
         path_vec = kwargs["x_path"]
         if self.bagged:
-            if self.attn_pool:
-                A = self.attention(path_vec)
-                path_vec = torch.sum(A * path_vec, dim=1)
-            else:
-                mask = torch.any(path_vec != 0, dim=-1)
-                path_vec = path_vec.sum(dim=1) / mask.sum(dim=1, keepdim=True)
-
+            path_vec = self.aggregate(path_vec)
         omic_vec, _, _ = self.omic_net(x_omic=kwargs["x_omic"])
         features = self.fusion(path_vec, omic_vec)
         grade = self.grade_clf(features)
         hazard = self.hazard_clf(features) * self.output_range + self.output_shift
-
         return features, grade, hazard
 
 
@@ -365,17 +360,18 @@ class GraphomicNet(nn.Module):
         dropout = opt.dropout
         feature_dim = 32
         mmhid = 64
-        self.graph_net = GraphNet(dropout=opt.dropout)
+        self.graph_net = GraphNet(dropout=opt.dropout, attn_pool=opt.attn_pool)
         self.omic_net = FFN(
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
         )
 
         rna = "_rna" if opt.rna else ""
-        omic_ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        attn = "_attn" if opt.attn_pool else ""
+        omic_ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
         self.omic_net.load_state_dict(omic_ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
-        graph_ckpt = torch.load(
-            f"checkpoints/{opt.task}/graph_{opt.mil}/graph_{opt.k}.pt"
+        graph_ckpt = print_load(
+            f"checkpoints/{opt.task}/graph_{opt.mil}{attn}/graph_{opt.k}.pt"
         )
         self.graph_net.load_state_dict(graph_ckpt["model"])
         self.graph_net = self.graph_net.to(opt.device)
@@ -396,7 +392,6 @@ class GraphomicNet(nn.Module):
         features = self.fusion(graph_vec, omic_vec)
         grade = self.grade_clf(features)
         hazard = self.hazard_clf(features) * self.output_range + self.output_shift
-
         return features, grade, hazard
 
 
@@ -406,19 +401,28 @@ class PathgraphomicNet(nn.Module):
         dropout = opt.dropout
         feature_dim = 32
         mmhid = 64
-        self.graph_net = GraphNet(dropout=opt.dropout)
+        self.graph_net = GraphNet(dropout=opt.dropout, attn_pool=opt.attn_pool)
         self.omic_net = FFN(
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
         )
 
         self.bagged = 1 if opt.mil == "pat" else 0
+        if opt.attn_pool == 1:
+            self.aggregate = AttentionAggregation(
+                features=feature_dim, hidden=16, dropout=0.25
+            )
+        else:
+            self.aggregate = self.mean_aggregation
 
         rna = "_rna" if opt.rna else ""
-        omic_ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        attn = "_attn" if opt.attn_pool else ""
+        omic_ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
         self.omic_net.load_state_dict(omic_ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
         mil = "instance" if opt.mil in ("instance", "paper") else opt.mil
-        graph_ckpt = torch.load(f"checkpoints/{opt.task}/graph_{mil}/graph_{opt.k}.pt")
+        graph_ckpt = print_load(
+            f"checkpoints/{opt.task}/graph_{mil}{attn}/graph_{opt.k}.pt"
+        )
         self.graph_net.load_state_dict(graph_ckpt["model"])
         self.graph_net = self.graph_net.to(opt.device)
 
@@ -432,11 +436,15 @@ class PathgraphomicNet(nn.Module):
         self.omic_net.freeze(True)
         self.graph_net.freeze(True)
 
+    @staticmethod
+    def mean_aggregation(x):
+        mask = torch.any(x != 0, dim=-1)
+        return x.sum(dim=1) / mask.sum(dim=1, keepdim=True)
+
     def forward(self, **kwargs):
         path_vec = kwargs["x_path"]
         if self.bagged:
-            mask = torch.any(path_vec != 0, dim=-1)
-            path_vec = path_vec.sum(dim=1) / mask.sum(dim=1, keepdim=True)
+            path_vec = self.aggregate(path_vec)
         graph_vec, _, _ = self.graph_net(x_graph=kwargs["x_graph"])
         omic_vec, _, _ = self.omic_net(x_omic=kwargs["x_omic"])
         features = self.fusion(path_vec, graph_vec, omic_vec)
@@ -468,7 +476,7 @@ class QBTNet(nn.Module):
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=2
         )
         rna = "_rna" if opt.rna else ""
-        ckpt = torch.load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
         self.omic_net.load_state_dict(ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
 

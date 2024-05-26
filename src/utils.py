@@ -1,14 +1,15 @@
+import os
+
 import pandas as pd
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim.lr_scheduler as lr_scheduler
 from lifelines.utils import concordance_index
 from sklearn.metrics import roc_auc_score
-import torch.optim.lr_scheduler as lr_scheduler
-import os
 from tabulate import tabulate
-import wandb
-import torch.nn as nn
 
+import wandb
 
 # from line_profiler import profile
 
@@ -19,9 +20,9 @@ import torch.nn as nn
 class PathomicLoss(nn.Module):
     def __init__(self, opt):
         super().__init__()
-        self.w_nll = 0 if opt.task == "surv" else 1
-        self.w_cox = 0 if opt.task == "grad" else 1
-        self.w_l1 = opt.l1
+        self.nll = 0 if opt.task == "surv" else 1
+        self.cox = 0 if opt.task == "grad" else 1
+        self.l1 = opt.l1
 
     @staticmethod
     def l1_reg(model):
@@ -30,6 +31,7 @@ class PathomicLoss(nn.Module):
             return sum(torch.abs(W).sum() for W in model.omic_net.parameters())
         else:
             # If no omic_net, assume opt.l1 set to 0
+            # This is here in case we are training the omic net itself
             return sum(torch.abs(W).sum() for W in model.parameters())
 
     @staticmethod
@@ -41,11 +43,11 @@ class PathomicLoss(nn.Module):
         return loss_cox
 
     def forward(self, model, grade, time, event, grade_pred, hazard_pred):
-        nll_loss = F.nll_loss(grade_pred, grade)
-        l1_loss = self.l1_reg(model)
-        cox_loss = self.cox_loss(time, event, hazard_pred)
-
-        total_loss = self.w_nll * nll_loss + self.w_l1 * l1_loss + self.w_cox * cox_loss
+        _zero = torch.tensor(0.0).to(grade.device)
+        nll_loss = F.nll_loss(grade_pred, grade) if self.nll else _zero
+        cox_loss = self.cox_loss(time, event, hazard_pred) if self.cox else _zero
+        l1_loss = self.l1_reg(model) if self.l1 else _zero
+        total_loss = nll_loss + cox_loss + l1_loss * self.l1
         return total_loss
 
 
@@ -76,6 +78,11 @@ def save_model(model, opt, preds):
     )
 
 
+def print_load(ckpt):
+    print(f"Loading {ckpt}")
+    return torch.load(ckpt)
+
+
 def make_results_table(metrics_list):
     df = pd.DataFrame(
         metrics_list,
@@ -89,7 +96,9 @@ def make_results_table(metrics_list):
     return tabulate(df.T, headers="keys", tablefmt="rounded_grid", floatfmt=".3f")
 
 
-def log_epoch(epoch, model, train_loader, test_loader, loss_fn, opt, train_loss, all_preds):
+def log_epoch(
+    epoch, model, train_loader, test_loader, loss_fn, opt, train_loss, all_preds
+):
     _, train_acc, train_auc, c_train = evaluate(
         model, train_loader, loss_fn, opt, pd.DataFrame(all_preds)
     )
@@ -101,7 +110,7 @@ def log_epoch(epoch, model, train_loader, test_loader, loss_fn, opt, train_loss,
         desc += f"AUC: {train_auc:.2f}/{test_auc:.2f} | "
         wandb.log(
             {
-                "train_acc": train_acc, 
+                "train_acc": train_acc,
                 "test_acc": test_acc,
                 "train_auc": train_auc,
                 "test_auc": test_auc,
