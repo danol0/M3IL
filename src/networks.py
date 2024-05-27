@@ -317,7 +317,7 @@ class PathomicNet(nn.Module):
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=0
         )
         rna = "_rna" if opt.rna else ""
-        ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt", device=opt.device)
         self.omic_net.load_state_dict(ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
 
@@ -367,11 +367,11 @@ class GraphomicNet(nn.Module):
 
         rna = "_rna" if opt.rna else ""
         attn = "_attn" if opt.attn_pool else ""
-        omic_ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        omic_ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt", device=opt.device)
         self.omic_net.load_state_dict(omic_ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
         graph_ckpt = print_load(
-            f"checkpoints/{opt.task}/graph_{opt.mil}{attn}/graph_{opt.k}.pt"
+            f"checkpoints/{opt.task}/graph_{opt.mil}{attn}/graph_{opt.k}.pt", device=opt.device
         )
         self.graph_net.load_state_dict(graph_ckpt["model"])
         self.graph_net = self.graph_net.to(opt.device)
@@ -416,12 +416,12 @@ class PathgraphomicNet(nn.Module):
 
         rna = "_rna" if opt.rna else ""
         attn = "_attn" if opt.attn_pool else ""
-        omic_ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        omic_ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt", device=opt.device)
         self.omic_net.load_state_dict(omic_ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
         mil = "instance" if opt.mil in ("instance", "paper") else opt.mil
         graph_ckpt = print_load(
-            f"checkpoints/{opt.task}/graph_{mil}{attn}/graph_{opt.k}.pt"
+            f"checkpoints/{opt.task}/graph_{mil}{attn}/graph_{opt.k}.pt", device=opt.device
         )
         self.graph_net.load_state_dict(graph_ckpt["model"])
         self.graph_net = self.graph_net.to(opt.device)
@@ -476,7 +476,7 @@ class QBTNet(nn.Module):
             input_dim=omic_xdim, omic_dim=feature_dim, dropout=dropout, dropout_layer=2
         )
         rna = "_rna" if opt.rna else ""
-        ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt")
+        ckpt = print_load(f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt", device=opt.device)
         self.omic_net.load_state_dict(ckpt["model"])
         self.omic_net = self.omic_net.to(opt.device)
 

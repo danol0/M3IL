@@ -78,9 +78,9 @@ def save_model(model, opt, preds):
     )
 
 
-def print_load(ckpt):
+def print_load(ckpt, device):
     print(f"Loading {ckpt}")
-    return torch.load(ckpt)
+    return torch.load(ckpt, map_location=device)
 
 
 def make_results_table(metrics_list):
