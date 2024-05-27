@@ -18,6 +18,7 @@ from src.options import parse_args
 # from torch.profiler import profile, record_function, ProfilerActivity
 
 torch.manual_seed(2019)
+torch.use_deterministic_algorithms(True)
 np.random.seed(2019)
 
 

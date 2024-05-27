@@ -185,7 +185,7 @@ def get_vgg19(opt):
         if key.startswith("features."):
             pretrained_dict[key[9:]] = pretrained_dict.pop(key)
 
-    print("Initializing Path Weights")
+    print("Initializing VGG19 Weights")
     model.conv_layers.load_state_dict(pretrained_dict, strict=True)
 
     return model

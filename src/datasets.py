@@ -215,7 +215,7 @@ def get_splits(opt):
     pnas_splits.set_index("TCGA ID", inplace=True)
     pnas_splits = pnas_splits.applymap(lambda x: x.lower())
 
-    if opt.use_vgg:
+    if opt.use_vgg and "path" in opt.model:
         vgg_ftype = "surv" if opt.task == "multi" else opt.task
         vgg_feats = pickle.load(
             open(f"{data_dir}/path/vgg_features_{vgg_ftype}.pkl", "rb")
@@ -223,20 +223,21 @@ def get_splits(opt):
 
     pat2roi = defaultdict(list)
     roi2patch = defaultdict(list)
-    for roi_fname in os.listdir(f"{data_dir}/graphs/"):
-        pat2roi[roi_fname[:12]].append(roi_fname.rstrip(".pt"))
-        # We do this with nested loops to preserve the order of the patches
-        # This allows us to match the patches to parent graphs as done in the paper
-        if opt.use_vgg:
-            for img_fname in vgg_feats.keys():
-                if img_fname.startswith(roi_fname.rstrip(".pt")):
-                    roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
+    if "graph" in opt.model or "path" in opt.model:
+        for roi_fname in os.listdir(f"{data_dir}/graphs/"):
+            pat2roi[roi_fname[:12]].append(roi_fname.rstrip(".pt"))
+            # We do this with nested loops to preserve the order of the patches
+            # This allows us to match the patches to parent graphs as done in the paper
+            if opt.use_vgg and "path" in opt.model:
+                for img_fname in vgg_feats.keys():
+                    if img_fname.startswith(roi_fname.rstrip(".pt")):
+                        roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
 
     for k in range(1, opt.folds + 1):
         split_data[k] = {
             split: {
                 pat: {
-                    "x_omic": dataset.loc[pat].drop(labels).values.astype(np.float32),
+                    "x_omic": dataset.loc[pat].drop(labels).values.astype(np.float32) if "omic" in opt.model else [],
                     "x_path": (
                         np.stack(
                             [
@@ -247,8 +248,8 @@ def get_splits(opt):
                         )
                         if opt.use_vgg
                         else [f"{data_dir}/path/ROIs/{roi}.png" for roi in pat2roi[pat]]
-                    ),
-                    "x_graph": [f"{data_dir}/graphs/{roi}.pt" for roi in pat2roi[pat]],
+                    ) if 'path' in opt.model else [],
+                    "x_graph": [f"{data_dir}/graphs/{roi}.pt" for roi in pat2roi[pat]] if 'graph' in opt.model else [],
                     "y": [
                         dataset.loc[pat]["Event"],
                         dataset.loc[pat]["Survival months"],
@@ -263,15 +264,16 @@ def get_splits(opt):
         }
 
         # Standardise omics
-        all_train_omics = np.vstack(
-            [split_data[k]["train"][pat]["x_omic"] for pat in split_data[k]["train"]]
-        )
-        scaler = StandardScaler().fit(all_train_omics)
-        for split in ["train", "test"]:
-            for pat in split_data[k][split]:
-                split_data[k][split][pat]["x_omic"] = scaler.transform(
-                    split_data[k][split][pat]["x_omic"].reshape(1, -1)
-                ).flatten()
+        if "omic" in opt.model:
+            all_train_omics = np.vstack(
+                [split_data[k]["train"][pat]["x_omic"] for pat in split_data[k]["train"]]
+            )
+            scaler = StandardScaler().fit(all_train_omics)
+            for split in ["train", "test"]:
+                for pat in split_data[k][split]:
+                    split_data[k][split][pat]["x_omic"] = scaler.transform(
+                        split_data[k][split][pat]["x_omic"].reshape(1, -1)
+                    ).flatten()
 
     return split_data
 
