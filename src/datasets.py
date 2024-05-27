@@ -188,7 +188,6 @@ def pad2max(batch, device):
     omic, path, graph, event, time, grade, pname = zip(*batch)
 
     # Find max number of images
-    print(type(path[0]))
     max_imgs = max([img.size(0) for img in path])
     # 0 pad
     path = [
@@ -229,7 +228,7 @@ def get_splits(opt):
             # We do this with nested loops to preserve the order of the patches
             # This allows us to match the patches to parent graphs as done in the paper
             if opt.use_vgg and "path" in opt.model:
-                for img_fname in vgg_feats.keys():
+                for img_fname in vgg_feats['1'].keys():
                     if img_fname.startswith(roi_fname.rstrip(".pt")):
                         roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
 
@@ -241,7 +240,7 @@ def get_splits(opt):
                     "x_path": (
                         np.stack(
                             [
-                                vgg_feats[patch]  # vgg_feats[k][patch]
+                                vgg_feats[str(k)][patch]
                                 for roi in pat2roi[pat]
                                 for patch in roi2patch[roi]
                             ]
