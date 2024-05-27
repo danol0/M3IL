@@ -54,7 +54,7 @@ def dfs_freeze(model, freeze):
 class AttentionAggregation(nn.Module):
     """Source: https://github.com/mahmoodlab/CLAM/blob/master/models/model_clam.py"""
 
-    def __init__(self, features=32, hidden=32, dropout=0.25):
+    def __init__(self, features=32, hidden=32, dropout=0):
         super().__init__()
         self.a = nn.Sequential(
             nn.Linear(features, hidden), nn.Sigmoid(), nn.Dropout(dropout)
@@ -124,13 +124,13 @@ class PathNet(nn.Module):
             nn.Dropout(0.05),
         )
 
-        self.bagged = 1 if opt.mil == "pat" else 0
-        if opt.attn_pool == 1:
-            self.aggregate = AttentionAggregation(
-                features=path_dim, hidden=16, dropout=0.25
-            )
-        else:
-            self.aggregate = self.mean_aggregation
+        # self.bagged = 1 if opt.mil == "pat" else 0
+        # if opt.attn_pool == 1:
+        #     self.aggregate = AttentionAggregation(
+        #         features=path_dim, hidden=16, dropout=0.25
+        #     )
+        # else:
+        #     self.aggregate = self.mean_aggregation
 
         self.grade_clf = nn.Sequential(nn.Linear(path_dim, 3), nn.LogSoftmax(dim=1))
         self.hazard_clf = nn.Sequential(nn.Linear(path_dim, 1), nn.Sigmoid())
@@ -151,8 +151,8 @@ class PathNet(nn.Module):
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         features = self.classifier(x)
-        if self.bagged:
-            features = self.aggregate(features)
+        # if self.bagged:
+        #     features = self.aggregate(features)
         grade = self.grade_clf(features)
         hazard = self.hazard_clf(features) * self.output_range + self.output_shift
         return features, grade, hazard
@@ -324,7 +324,7 @@ class PathomicNet(nn.Module):
         self.bagged = 1 if opt.mil == "pat" else 0
         if opt.attn_pool == 1:
             self.aggregate = AttentionAggregation(
-                features=feature_dim, hidden=16, dropout=0.25
+                features=feature_dim, hidden=32, dropout=0
             )
         else:
             self.aggregate = self.mean_aggregation
@@ -409,7 +409,7 @@ class PathgraphomicNet(nn.Module):
         self.bagged = 1 if opt.mil == "pat" else 0
         if opt.attn_pool == 1:
             self.aggregate = AttentionAggregation(
-                features=feature_dim, hidden=16, dropout=0.25
+                features=feature_dim, hidden=32, dropout=0
             )
         else:
             self.aggregate = self.mean_aggregation

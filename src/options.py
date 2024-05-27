@@ -34,6 +34,8 @@ def parse_args():
     opt = parser.parse_known_args()[0]
 
     # Defaults that dynamically align with paper (if not overridden)
+    if 'omic' in opt.model and opt.task == "surv":
+        parser.set_defaults(rna=1)
     if opt.model == "path":
         parser.set_defaults(batch_size=8, lr=0.0005, l1=0)
     if opt.model == "omic":
@@ -49,7 +51,7 @@ def parse_args():
         if opt.mil in ('instance', 'paper'):
             parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
         else:
-            parser.set_defaults(lr=0.0005)
+            parser.set_defaults(lr=0.0005, adam_b1=0.5)
 
     opt = parser.parse_known_args()[0]
 
