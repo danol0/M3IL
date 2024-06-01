@@ -34,7 +34,7 @@ def parse_args():
     opt = parser.parse_known_args()[0]
 
     # Defaults that dynamically align with paper (if not overridden)
-    if 'omic' in opt.model and opt.task == "surv":
+    if "omic" in opt.model and opt.task == "surv":
         parser.set_defaults(rna=1)
     if opt.model == "path":
         parser.set_defaults(batch_size=8, lr=0.0005, l1=0)
@@ -48,10 +48,12 @@ def parse_args():
         parser.set_defaults(l1=0)
     # NOTE: Dont like these settings but they are in the paper, only using for instance MIL
     if opt.model in ("pathomic", "graphomic", "pathgraphomic"):
-        if opt.mil in ('instance', 'paper'):
+        if opt.mil in ("instance", "paper"):
             parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
         else:
             parser.set_defaults(lr=0.0005, adam_b1=0.5)
+    if opt.model == "pathgraphomic":
+        parser.set_defaults(mil='paper')
 
     opt = parser.parse_known_args()[0]
 

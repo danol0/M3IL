@@ -11,3 +11,5 @@ wandb/*
 *.zip
 *.DS_Store
 env.yml
+figs/*
+*.pkl

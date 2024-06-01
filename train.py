@@ -8,11 +8,12 @@ from tabulate import tabulate
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import src.utils as utils
+import src.tools.train_utils as utils
 import wandb
-from src.datasets import define_collate_fn, define_dataset, get_splits
-from src.networks import define_model
-from src.options import parse_args
+from src.dataset.loaders import define_collate_fn, define_dataset
+from src.dataset.preprocess import get_splits
+from src.tools.evaluation import make_empty_data_dict
+from src.tools.options import parse_args
 
 # from line_profiler import profile
 # from torch.profiler import profile, record_function, ProfilerActivity
@@ -50,12 +51,14 @@ def train(model, split_data, accelerator, opt):
 
         model.train()
         train_loss = 0
-        all_preds = utils.make_empty_data_dict()
+        all_preds = make_empty_data_dict()
 
         if epoch == 5:
-            if opt.model in ("pathomic_qbt", "pathomic"):
+            if "pathomic" in opt.model:
+                pbar.set_description("Unfreezing omic")
                 model.omic_net.freeze(False)
-            if opt.model in ("graphomic", "pathgraphomic"):
+            if "graphomic" in opt.model:
+                pbar.set_description("Unfreezing omic and graph")
                 model.omic_net.freeze(False)
                 model.graph_net.freeze(False)
 
@@ -134,7 +137,7 @@ if __name__ == "__main__":
             name=f"{group}_{k}",
         )
 
-        model = define_model(opt)
+        model = utils.define_model(opt)
         if k == 1:
             print(model)
             print(
