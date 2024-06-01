@@ -8,8 +8,8 @@ import torch.optim.lr_scheduler as lr_scheduler
 from tabulate import tabulate
 
 import wandb
-from src.networks.multimodal import DynamicFusion
-from src.networks.unimodal import FFN, GNN, get_vgg19
+from src.networks.multimodal import FlexibleFusion
+from src.networks.unimodal import FFN, GNN, build_vgg19_encoder
 from src.tools.evaluation import evaluate
 
 # from line_profiler import profile
@@ -52,14 +52,31 @@ class PathomicLoss(nn.Module):
 
 # --- Training ---
 def define_model(opt):
+
+    # TODO: Tidy this up
+    if 'graph' in opt.model:
+        agg = None
+        if opt.mil == "pat":
+            if 'qbt' in opt.model:
+                agg = 'collate'
+            else:
+                agg = 'attn' if opt.attn_pool else 'mean'
+        opt.graph_pool = agg
+
     if opt.model == "omic":
-        model = FFN(opt, xdim=320 if opt.rna else 80)
+        model = FFN(xdim=320 if opt.rna else 80, fdim=32, dropout=opt.dropout)
+
     elif opt.model == "graph":
-        model = GNN(opt)
+
+        model = GNN(fdim=32, pool=opt.graph_pool, dropout=opt.dropout)
+
     elif opt.model == "path":
-        model = get_vgg19(opt)
+        if opt.mil == 'pat':
+            raise NotImplementedError("Bagging not implemented for path model.")
+        model = build_vgg19_encoder(fdim=32)
+
     elif any(m in opt.model for m in ("pathomic", "graphomic", "pathgraphomic")):
-        model = DynamicFusion(opt, mmfdim=32 if "qbt" in opt.model else 64)
+        model = FlexibleFusion(opt, fdim=32, mmfdim=32 if "qbt" in opt.model else 64)
     else:
         raise NotImplementedError(f"Model {opt.model} not implemented")
     return model

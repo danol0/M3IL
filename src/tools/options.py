@@ -16,7 +16,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="omic")
     parser.add_argument("--task", type=str, default="grad", choices=["multi", "surv", "grad"])
     parser.add_argument("--rna", type=int, default=1, help="Use RNA data")
-    parser.add_argument("--mil", type=str, default="instance", choices=["pat", "instance", "paper"])
+    parser.add_argument("--mil", type=str, default="instance", choices=["pat", "instance"])
     parser.add_argument("--attn_pool", type=int, default=0, help="Use attention pooling")
     parser.add_argument("--collate", type=str, default="pad", choices=["pad", "min"])
     parser.add_argument("--use_vgg", type=int, default=1, help="Use pre-extracted VGG features")
@@ -48,12 +48,10 @@ def parse_args():
         parser.set_defaults(l1=0)
     # NOTE: Dont like these settings but they are in the paper, only using for instance MIL
     if opt.model in ("pathomic", "graphomic", "pathgraphomic"):
-        if opt.mil in ("instance", "paper"):
+        if opt.mil == "instance":
             parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
         else:
             parser.set_defaults(lr=0.0005, adam_b1=0.5)
-    if opt.model == "pathgraphomic":
-        parser.set_defaults(mil='paper')
 
     opt = parser.parse_known_args()[0]
 

@@ -1,11 +1,14 @@
+from argparse import Namespace
+
 import pandas as pd
 import torch
+import torch.nn as nn
 from lifelines.utils import concordance_index
 from sklearn.metrics import roc_auc_score
 
 
 # --- Evaluation ---
-def make_empty_data_dict():
+def make_empty_data_dict() -> dict:
     keys = [
         "patname",
         "grade_p_0",
@@ -20,8 +23,10 @@ def make_empty_data_dict():
 
 
 @torch.no_grad()
-def get_all_preds(model, data_loader):
-    """Outputs dataframe of all predictions and ground truths."""
+def get_all_preds(
+    model: nn.Module, data_loader: torch.utils.data.DataLoader
+) -> pd.DataFrame:
+    """Creates dataframe of all predictions and ground truths for model evaluation."""
 
     model.eval()
     all_preds = make_empty_data_dict()
@@ -42,14 +47,31 @@ def get_all_preds(model, data_loader):
 
 
 @torch.no_grad()
-def evaluate(model, data_loader, loss_fn, opt, precomp=None, return_preds=False):
-    """Computes all metrics for a given model and dataset."""
+def evaluate(
+    model: nn.Module,
+    data_loader: torch.utils.data.DataLoader,
+    loss_fn: nn.Module,
+    opt: Namespace,
+    precomp: pd.DataFrame = None,
+    return_preds: bool = False,
+) -> tuple:
+    """
+    Evaluates a model against task relevant metrics.
+
+    Args:
+        model (nn.Module): Model to evaluate.
+        data_loader (torch.utils.data.DataLoader): Data loader for evaluation data.
+        loss_fn (nn.Module): Loss function for evaluation.
+        opt (Namespace): Command line arguments.
+        precomp (pd.DataFrame): Precomputed predictions for evaluation.
+        return_preds (bool): Whether to return the predictions DataFrame.
+    """
 
     all_preds = get_all_preds(model, data_loader) if precomp is None else precomp
 
     # If instance level MIL, aggregate predictions by patient
-    if opt.mil in ("instance", "paper"):
-        # aggregrate by patient
+    if opt.mil == "instance":
+        # Aggregrate by patient
         all_preds = all_preds.groupby("patname").agg(
             {
                 "grade_p_0": "max",
@@ -61,6 +83,8 @@ def evaluate(model, data_loader, loss_fn, opt, precomp=None, return_preds=False)
                 "time": "first",
             }
         )
+
+    assert all_preds.index.is_unique
 
     grade_logits = all_preds[["grade_p_0", "grade_p_1", "grade_p_2"]].values
 

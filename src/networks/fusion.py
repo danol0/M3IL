@@ -1,16 +1,24 @@
+from argparse import Namespace
+
 import torch
 import torch.nn as nn
 
+"""
+This module reimplements the Kroneker fusion described in the paper. For reproducibility
+purposes, hyperparameters have been hardcoded to match the paper's implementation.
+Reference: https://github.com/mahmoodlab/PathomicFusion
+"""
 
-def define_tensor_fusion(opt, mmfdim=64):
-    """Defines tensor fusion as described in the paper."""
+
+def define_tensor_fusion(opt: Namespace, mmfdim: int) -> nn.Module:
+    """Reproduces the Kroneker fusion."""
 
     gate_path = (
-        0 if opt.task == "grad" and opt.model in ("pathomic", "pathgraphomic") else 1
+        False if opt.task == "grad" and opt.model in ("pathomic", "pathgraphomic") else True
     )
-    gate_graph = 0 if opt.task == "grad" and opt.model == "graphomic" else 1
+    gate_graph = False if opt.task == "grad" and opt.model == "graphomic" else True
     gate_omic = (
-        0 if opt.task == "surv" and opt.model in ("pathomic", "graphomic") else 1
+        False if opt.task == "surv" and opt.model in ("pathomic", "graphomic") else True
     )
     path_scale = 1
     graph_scale = (
@@ -36,7 +44,7 @@ def define_tensor_fusion(opt, mmfdim=64):
             device=opt.device,
             fdim=32,
             mmfdim=mmfdim,
-            gate_graph_with_omic=1 if opt.task == "surv" else 0,
+            gate_graph_with_omic=True if opt.task == "surv" else False,
             gate_path=gate_path,
             gate_graph=gate_graph,
             gate_omic=gate_omic,
@@ -50,8 +58,8 @@ def define_tensor_fusion(opt, mmfdim=64):
 
 
 class TensorFusion(nn.Module):
-    def __init__(self, device, fdim, dropout):
-        """Base class for bimodal and trimodal tensor fusion."""
+    def __init__(self, device: torch.device, fdim: int, dropout: float) -> None:
+        """Implements shared operations for bimodal and trimodal tensor fusion."""
 
         super().__init__()
         self.device = device
@@ -59,13 +67,17 @@ class TensorFusion(nn.Module):
         self.dropout = dropout
         self.sigmoid = nn.Sigmoid()
 
-    def _tensor_fusion(self, tensors):
+    def _tensor_fusion(self, tensors: list) -> torch.Tensor:
+        """Kronecker product fusion of a list of encoded modalities."""
+
         fused = tensors[0]
         for t in tensors[1:]:
             fused = torch.bmm(fused.unsqueeze(2), t.unsqueeze(1)).flatten(start_dim=1)
         return fused
 
-    def _create_gate_layers(self, scaled_dim):
+    def _create_gate_layers(self, scaled_dim: int) -> tuple:
+        """Creates layers required for feature gating."""
+
         rescale_layer = nn.Sequential(nn.Linear(self.fdim, scaled_dim), nn.ReLU())
         gate_weight_layer = nn.Bilinear(self.fdim, self.fdim, scaled_dim)
         out_layer = nn.Sequential(
@@ -73,39 +85,58 @@ class TensorFusion(nn.Module):
         )
         return rescale_layer, gate_weight_layer, out_layer
 
-    def _rescale_and_gate(self, x, x_gate, rescale_layer, gate_layer, out_layer, gate):
-        """NOTE: Gating behaviour has been changed from the paper.
+    def _rescale_and_gate(self, x: torch.Tensor, x_gate: torch.Tensor, rescale_layer: nn.Module, gate_layer: nn.Module, out_layer: nn.Module, gate: int) -> torch.Tensor:
+        """
+        Rescales and gates a modality.
+
+        NOTE: Gating behaviour has been changed from the paper.
         Specifically, the paper does not apply the rescaling layer if the gate is off.
         This would result in an error if a mode is rescaled but not gated, as the out layer
-        would expect the rescaled input. This implementation applies the rescaling layer
-        regardless of the gate state."""
-
-        o = rescale_layer(x)
-        w = self.sigmoid(gate_layer(x, x_gate)) if gate else 1
-        o = out_layer(w * o)
+        expects a rescaled input. This implementation applies the rescaling layer regardless 
+        of the gate state, meaning that ungated modalities undergo an additional transformation
+        vs the paper's implementation.
+        """
+        o = rescale_layer(x)  # fdim -> scaled_dim
+        w = self.sigmoid(gate_layer(x, x_gate)) if gate else 1  # fdim -> scaled_dim
+        o = out_layer(w * o)  # scaled_dim -> scaled_dim
         return o
 
-    def _append_one(self, o):
-        return torch.cat(
-            (o, torch.FloatTensor(o.shape[0], 1).fill_(1).to(self.device)), 1
-        )
+    def _append_one(self, x: torch.Tensor) -> torch.Tensor:
+        _one = torch.ones((x.shape[0], 1), device=self.device)
+        return torch.cat((x, _one), dim=1)
 
 
 class Trimodal(TensorFusion):
     def __init__(
         self,
-        device,
-        fdim=32,
-        mmfdim=64,
-        gate_graph_with_omic=1,
-        gate_path=1,
-        gate_graph=1,
-        gate_omic=1,
-        path_scale=1,
-        graph_scale=1,
-        omic_scale=1,
-        dropout=0.25,
-    ):
+        device: torch.device,
+        fdim: int,
+        mmfdim: int,
+        gate_graph_with_omic: bool,
+        gate_path: bool,
+        gate_graph: bool,
+        gate_omic: bool,
+        path_scale: int,
+        graph_scale: int,
+        omic_scale: int,
+        dropout: float,
+    ) -> None:
+        """
+        Trimodal tensor fusion.
+
+        Args:
+            device (torch.device): Pytorch backend.
+            fdim (int): Dimension of input feature vector for each modality.
+            mmfdim (int): Dimension of the output multimodal feature vector.
+            gate_graph_with_omic (bool): True gates graph with omic, False gates graph with path.
+            gate_path (bool): Whether to gate the path feature vector.
+            gate_graph (bool): Whether to gate the graph feature vector.
+            gate_omic (bool): Whether to gate the omic feature vector.
+            path_scale (int): Scaling factor for the path feature vector.
+            graph_scale (int): Scaling factor for the graph feature vector.
+            omic_scale (int): Scaling factor for the omic feature vector.
+            dropout (float): Dropout rate.
+        """
         # Register attributes
         super().__init__(device, fdim, dropout)
         self.gate_path = gate_path
@@ -141,7 +172,7 @@ class Trimodal(TensorFusion):
             nn.Dropout(p=self.dropout),
         )
 
-    def forward(self, **kwargs):
+    def forward(self, **kwargs: dict) -> torch.Tensor:
         f_path, f_graph, f_omic = kwargs["f_path"], kwargs["f_graph"], kwargs["f_omic"]
         p = self._rescale_and_gate(
             f_path,
@@ -179,15 +210,28 @@ class Trimodal(TensorFusion):
 class Bimodal(TensorFusion):
     def __init__(
         self,
-        device,
-        fdim=32,
-        mmfdim=64,
-        gate1=1,
-        gate2=1,
-        scale_dim1=1,
-        scale_dim2=1,
-        dropout=0.25,
-    ):
+        device: torch.device,
+        fdim: int,
+        mmfdim: int,
+        gate1: bool,
+        gate2: bool,
+        scale_dim1: int,
+        scale_dim2: int,
+        dropout: float,
+    ) -> None:
+        """
+        Bimodal tensor fusion.
+
+        Args:
+            device (torch.device): Pytorch backend.
+            fdim (int): Dimension of input feature vector for each modality.
+            mmfdim (int): Dimension of the output multimodal feature vector.
+            gate1 (bool): Whether to gate the first feature vector.
+            gate2 (bool): Whether to gate the second feature vector.
+            scale_dim1 (int): Scaling factor for the first feature vector.
+            scale_dim2 (int): Scaling factor for the second feature vector.
+            dropout (float): Dropout rate.
+        """
         super().__init__(device, fdim, dropout)
         self.gate1 = gate1
         self.gate2 = gate2
@@ -212,7 +256,7 @@ class Bimodal(TensorFusion):
             nn.Dropout(p=self.dropout),
         )
 
-    def forward(self, **kwargs):
+    def forward(self, **kwargs: dict) -> torch.Tensor:
         vec1 = kwargs["f_path"] or kwargs["f_graph"]
         # Omic is always present and takes the second position
         vec2 = kwargs["f_omic"]
