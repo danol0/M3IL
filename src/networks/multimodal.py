@@ -24,7 +24,7 @@ class FlexibleFusion(BaseEncoder):
         Dynamic multimodal fusion of path, graph and omics data:
         1. Handles encoding of each modality with (pre-trained) modality-specific encoders
         2. Aggregates path images if necessary
-        3. Calls a fusion module to combine the multimodal features
+        3. Calls a fusion architecture to combine the multimodal features
 
         Args:
             opt (Namespace): Command line arguments, specifying model and task
@@ -66,7 +66,7 @@ class FlexibleFusion(BaseEncoder):
                     if opt.attn_pool
                     else MaskedMeanPool()
                 )
-            if not opt.use_vgg:
+            if not opt.pre_encoded_path:
                 self.path_net = build_vgg19_encoder(opt)
                 path_ckpt = print_load(
                     f"checkpoints/{opt.task}/path_instance/path_{opt.k}.pt",
@@ -103,6 +103,13 @@ class FlexibleFusion(BaseEncoder):
 
         x = self.fusion(f_omic=o, f_graph=g, f_path=p)
         return self.output(x)
+
+    def l1(self) -> torch.Tensor:
+        # We only regularise the omic_net in MM models
+        if hasattr(self, "omic_net"):
+            return sum(torch.abs(W).sum() for W in self.omic_net.parameters())
+        else:
+            return torch.tensor(0.0).to(next(self.parameters()).device)
 
 
 class QBT(nn.Module):

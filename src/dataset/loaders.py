@@ -59,7 +59,7 @@ class patientLevelDataset(Dataset):
         self.model = opt.model
         self.data = data[split]
         self.patnames = list(self.data.keys())
-        self.vgg = opt.use_vgg
+        self.pre_encoded_path = opt.pre_encoded_path
         self.transform = get_transforms()
 
     def __getitem__(self, idx: int) -> tuple:
@@ -71,7 +71,7 @@ class patientLevelDataset(Dataset):
             omic = torch.tensor(self.data[pname]["x_omic"], dtype=torch.float32)
 
         if "path" in self.model:
-            if self.vgg:
+            if self.pre_encoded_path:
                 path = self.data[pname]["x_path"]
                 path = torch.tensor(path, dtype=torch.float32).squeeze(1)
             else:
@@ -106,15 +106,20 @@ class instanceLevelDataset(Dataset):
         """
         self.model = opt.model
         self.data = data[split]
-        self.vgg = opt.use_vgg
+        self.pre_encoded_path = opt.pre_encoded_path
         self.transform = get_transforms()
 
         combinations = []
         for pat in self.data.keys():
             num_path = len(self.data[pat]["x_path"]) if "path" in self.model else 1
             num_graph = len(self.data[pat]["x_graph"]) if "graph" in self.model else 1
-            assert num_path == num_graph * 9
-            combinations.extend([(pat, i, i // 9) for i in range(num_path)])
+            if 'pathgraph' in self.model:
+                assert num_path == num_graph * 9
+                combinations.extend([(pat, i, i // 9) for i in range(num_path)])
+            else:
+                combinations.extend(
+                    [(pat, i, j) for i in range(num_path) for j in range(num_graph)]
+                )
         self.combinations = combinations
 
     def __getitem__(self, idx):
@@ -125,7 +130,7 @@ class instanceLevelDataset(Dataset):
             omic = torch.tensor(self.data[pat]["x_omic"], dtype=torch.float32)
 
         if "path" in self.model:
-            if self.vgg:
+            if self.pre_encoded_path:
                 path = torch.tensor(
                     self.data[pat]["x_path"][path_idx], dtype=torch.float32
                 ).squeeze(0)

@@ -117,10 +117,10 @@ if __name__ == "__main__":
     attn = "_attn" if opt.attn_pool else ""
     # Ignore MIL for omic as there is only 1 instance per patient
     if opt.model == "omic":
-        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}"
+        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}"
         group = f"{opt.task}_{opt.model}{rna}"
     else:
-        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}_{opt.mil}{attn}"
+        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}_{opt.mil}{attn}"
         group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{attn}"
     print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
     for k in range(1, opt.folds + 1):

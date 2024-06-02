@@ -43,6 +43,9 @@ class BaseEncoder(nn.Module):
     def freeze(self, freeze: bool) -> None:
         dfs_freeze(self, freeze)
 
+    def l1(self) -> torch.Tensor:
+        return sum(torch.abs(W).sum() for W in self.parameters())
+
 
 # --- Pooling ---
 class BaseAttentionPool(nn.Module):
@@ -251,6 +254,44 @@ class GNN(BaseEncoder):
 
 
 # --- Path ---
+class ResNetClassifier(BaseEncoder):
+    def __init__(self, xdim: int = 2048, fdim: int = 32, pool: str = None, dropout: float = 0.25) -> None:
+        """
+        Classifier for pre-extracted resnet features.
+
+        Args:
+            xdim (int): Input feature dimension.
+            fdim (int): Encoded feature dimension.
+            pool (str): MIL aggregation method: attn, mean, None.
+            dropout (float): Dropout rate.
+        """
+        super().__init__(fdim)
+        hidden = [fdim]
+
+        layers = []
+        for i in range(len(hidden)):
+            layers.append(nn.Linear(hidden[i - 1] if i > 0 else xdim, hidden[i]))
+            layers.append(nn.ReLU(True))
+            layers.append(nn.Dropout(dropout))
+
+        self.encoder = nn.Sequential(*layers)
+
+        if pool == "attn":
+            self.aggregate = MaskedAttentionPool(fdim=32, hdim=32, dropout=0)
+        elif pool == "mean":
+            self.aggregate = MaskedMeanPool()
+        elif pool is None:
+            self.aggregate = None
+        else:
+            raise NotImplementedError(f"Aggregation method {pool} not implemented.")
+
+    def forward(self, **kwargs: torch.Tensor) -> tuple:
+        x = kwargs["x_path"]
+        x = self.encoder(x)
+        x = self.aggregate(x) if self.aggregate else x
+        return self.output(x)
+
+
 class VGGNet(BaseEncoder):
     def __init__(self, vgg_layers: nn.Module, fdim: int = 32) -> None:
         """

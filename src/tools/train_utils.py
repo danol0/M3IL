@@ -1,4 +1,5 @@
 import os
+import warnings
 
 import pandas as pd
 import torch
@@ -9,7 +10,8 @@ from tabulate import tabulate
 
 import wandb
 from src.networks.multimodal import FlexibleFusion
-from src.networks.unimodal import FFN, GNN, build_vgg19_encoder
+from src.networks.unimodal import (FFN, GNN, ResNetClassifier,
+                                   build_vgg19_encoder)
 from src.tools.evaluation import evaluate
 
 # from line_profiler import profile
@@ -24,16 +26,6 @@ class PathomicLoss(nn.Module):
         self.l1 = opt.l1
 
     @staticmethod
-    def l1_reg(model):
-        # We only regularise the omic_net
-        if hasattr(model, "omic_net"):
-            return sum(torch.abs(W).sum() for W in model.omic_net.parameters())
-        else:
-            # If no omic_net, assume opt.l1 set to 0
-            # This is here in case we are training the omic net itself
-            return sum(torch.abs(W).sum() for W in model.parameters())
-
-    @staticmethod
     def cox_loss(survtime, event, hazard_pred):
         R_mat = (survtime.repeat(len(survtime), 1) >= survtime.unsqueeze(1)).int()
         theta = hazard_pred.view(-1)
@@ -43,11 +35,10 @@ class PathomicLoss(nn.Module):
 
     def forward(self, model, grade, time, event, grade_pred, hazard_pred):
         _zero = torch.tensor(0.0).to(grade.device)
-        nll_loss = F.nll_loss(grade_pred, grade) if self.nll else _zero
-        cox_loss = self.cox_loss(time, event, hazard_pred) if self.cox else _zero
-        l1_loss = self.l1_reg(model) if self.l1 else _zero
-        total_loss = nll_loss + cox_loss + l1_loss * self.l1
-        return total_loss
+        nll = F.nll_loss(grade_pred, grade) if self.nll else _zero
+        cox = self.cox_loss(time, event, hazard_pred) if self.cox else _zero
+        l1 = model.l1() if self.l1 else _zero
+        return nll + cox + l1 * self.l1
 
 
 # --- Training ---
@@ -71,9 +62,16 @@ def define_model(opt):
         model = GNN(fdim=32, pool=opt.graph_pool, dropout=opt.dropout)
 
     elif opt.model == "path":
-        if opt.mil == 'pat':
-            raise NotImplementedError("Bagging not implemented for path model.")
-        model = build_vgg19_encoder(fdim=32)
+        if opt.use_vggnet:
+            if opt.mil == 'pat':
+                raise NotImplementedError("Bagging not implemented for VGG model.")
+            model = build_vgg19_encoder(fdim=32)
+        else:
+            pool = None
+            if opt.mil == 'pat':
+                pool = 'attn' if opt.attn_pool else 'mean'
+            warnings.warn("NOQA: ResNet implementation is experimental.")
+            model = ResNetClassifier(fdim=32, pool=pool, dropout=opt.dropout)
 
     elif any(m in opt.model for m in ("pathomic", "graphomic", "pathgraphomic")):
         model = FlexibleFusion(opt, fdim=32, mmfdim=32 if "qbt" in opt.model else 64)

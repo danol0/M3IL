@@ -23,11 +23,22 @@ def get_splits(opt):
     pnas_splits.set_index("TCGA ID", inplace=True)
     pnas_splits = pnas_splits.applymap(lambda x: x.lower())
 
-    if opt.use_vgg and "path" in opt.model:
-        vgg_ftype = "surv" if opt.task == "multi" else opt.task
-        vgg_feats = pickle.load(
-            open(f"{data_dir}/path/vgg_features_{vgg_ftype}.pkl", "rb")
-        )
+    if opt.pre_encoded_path and "path" in opt.model:
+        if opt.use_vggnet:
+            vgg_ftype = "surv" if opt.task == "multi" else opt.task
+            try:
+                vgg_feats = pickle.load(
+                    open(f"{data_dir}/path/vgg_features_{vgg_ftype}.pkl", "rb")
+                )
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f"Pre-extracted VGG features not found for {vgg_ftype}"
+                )
+        else:
+            try:
+                vgg_feats = pickle.load(open(f"{data_dir}/path/resnet_features.pkl", "rb"))
+            except FileNotFoundError:
+                raise FileNotFoundError("Pre-extracted ResNet features not found")
 
     pat2roi = defaultdict(list)
     roi2patch = defaultdict(list)
@@ -36,8 +47,9 @@ def get_splits(opt):
             pat2roi[roi_fname[:12]].append(roi_fname.rstrip(".pt"))
             # We do this with nested loops to preserve the order of the patches
             # This allows us to match the patches to parent graphs as done in the paper
-            if opt.use_vgg and "path" in opt.model:
-                for img_fname in vgg_feats["1"].keys():
+            if opt.pre_encoded_path and "path" in opt.model:
+                path_dict = vgg_feats["1"] if opt.use_vggnet else vgg_feats
+                for img_fname in path_dict.keys():
                     if img_fname.startswith(roi_fname.rstrip(".pt")):
                         roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
 
@@ -54,12 +66,12 @@ def get_splits(opt):
                         (
                             np.stack(
                                 [
-                                    vgg_feats[str(k)][patch]
+                                    vgg_feats[str(k)][patch] if opt.use_vggnet else vgg_feats[patch]
                                     for roi in pat2roi[pat]
                                     for patch in roi2patch[roi]
                                 ]
                             )
-                            if opt.use_vgg
+                            if opt.pre_encoded_path
                             else [
                                 f"{data_dir}/path/ROIs/{roi}.png"
                                 for roi in pat2roi[pat]

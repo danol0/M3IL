@@ -7,6 +7,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     # Run settings
+    parser.add_argument("--save_dir", type=str, default="checkpoints")
     parser.add_argument("--dry_run", type=int, default=0, help="No save or log")
     parser.add_argument("--folds", type=int, default=15, choices=range(1, 16))
     parser.add_argument("--data_dir", type=str, default="data")
@@ -19,7 +20,8 @@ def parse_args():
     parser.add_argument("--mil", type=str, default="instance", choices=["pat", "instance"])
     parser.add_argument("--attn_pool", type=int, default=0, help="Use attention pooling")
     parser.add_argument("--collate", type=str, default="pad", choices=["pad", "min"])
-    parser.add_argument("--use_vgg", type=int, default=1, help="Use pre-extracted VGG features")
+    parser.add_argument("--pre_encoded_path", type=int, default=1, help="Use pre-extracted VGG features")
+    parser.add_argument("--use_vggnet", type=int, default=1, help="Use VGG or ResNet for path data")
 
     # Training args
     parser.add_argument("--batch_size", type=int, default=32)
@@ -31,8 +33,10 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.25, help="Dropout rate")
     parser.add_argument("--adam_b1", type=float, default=0.9, help="Adam momentum")
 
-    opt = parser.parse_known_args()[0]
+    opt = parser.parse_args()
 
+    if not opt.use_vggnet and not opt.pre_encoded_path:
+        raise ValueError("Must use pre-encoded path features with ResNet")
     # Defaults that dynamically align with paper (if not overridden)
     if "omic" in opt.model and opt.task == "surv":
         parser.set_defaults(rna=1)
@@ -53,7 +57,7 @@ def parse_args():
         else:
             parser.set_defaults(lr=0.0005, adam_b1=0.5)
 
-    opt = parser.parse_known_args()[0]
+    opt = parser.parse_args()
 
     return opt, str_options(parser, opt)
 

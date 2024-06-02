@@ -257,7 +257,7 @@ class Bimodal(TensorFusion):
         )
 
     def forward(self, **kwargs: dict) -> torch.Tensor:
-        vec1 = kwargs["f_path"] or kwargs["f_graph"]
+        vec1 = kwargs["f_path"] if kwargs["f_path"] is not None else kwargs["f_graph"]
         # Omic is always present and takes the second position
         vec2 = kwargs["f_omic"]
         o1 = self._rescale_and_gate(
