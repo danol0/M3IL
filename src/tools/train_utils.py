@@ -1,6 +1,7 @@
 import os
 import warnings
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -21,9 +22,10 @@ from src.tools.evaluation import evaluate
 class PathomicLoss(nn.Module):
     def __init__(self, opt):
         super().__init__()
-        self.nll = 0 if opt.task == "surv" else 1
-        self.cox = 0 if opt.task == "grad" else 1
+        self.nll = False if opt.task == "surv" else True
+        self.cox = False if opt.task == "grad" else True
         self.l1 = opt.l1
+        self.device = opt.device
 
     @staticmethod
     def cox_loss(survtime, event, hazard_pred):
@@ -34,7 +36,7 @@ class PathomicLoss(nn.Module):
         return loss_cox
 
     def forward(self, model, grade, time, event, grade_pred, hazard_pred):
-        _zero = torch.tensor(0.0).to(grade.device)
+        _zero = torch.tensor(0.0).to(self.device)
         nll = F.nll_loss(grade_pred, grade) if self.nll else _zero
         cox = self.cox_loss(time, event, hazard_pred) if self.cox else _zero
         l1 = model.l1() if self.l1 else _zero
@@ -71,7 +73,7 @@ def define_model(opt):
             if opt.mil == 'pat':
                 pool = 'attn' if opt.attn_pool else 'mean'
             warnings.warn("NOQA: ResNet implementation is experimental.")
-            model = ResNetClassifier(fdim=32, pool=pool, dropout=opt.dropout)
+            model = ResNetClassifier(pool=pool)
 
     elif any(m in opt.model for m in ("pathomic", "graphomic", "pathgraphomic")):
         model = FlexibleFusion(opt, fdim=32, mmfdim=32 if "qbt" in opt.model else 64)
@@ -105,6 +107,12 @@ def save_model(model, opt, preds):
     preds.to_csv(
         os.path.join(mkdir(f"{opt.ckpt_dir}/results"), f"{opt.model}_{opt.k}.csv")
     )
+
+
+def set_seed(seed: int) -> None:
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    np.random.seed(seed)
 
 
 def make_results_table(metrics_list):

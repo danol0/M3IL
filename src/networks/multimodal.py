@@ -102,7 +102,7 @@ class FlexibleFusion(BaseEncoder):
             o = self.omic_net(x_omic=kwargs["x_omic"])[0]
 
         x = self.fusion(f_omic=o, f_graph=g, f_path=p)
-        return self.output(x)
+        return self.predict(x)
 
     def l1(self) -> torch.Tensor:
         # We only regularise the omic_net in MM models

@@ -1,5 +1,6 @@
 import os
 import pickle
+from argparse import Namespace
 from collections import defaultdict
 
 import numpy as np
@@ -7,8 +8,23 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 
-def get_splits(opt):
-    """Gets the data splits for the PNAS dataset."""
+def get_splits(opt: Namespace) -> dict:
+    """
+    Constructs the data splits for the TCGA-GBMLGG dataset.
+    Only includes data necessary for the specified model.
+    Standardises omics data.
+
+    Returns a nested dictionary of the form:
+        split {
+            patient_id {
+                x_omic: omic data tensor
+                x_path: pre-extracted histology feature tensor or list of image paths
+                x_graph: list of graph data paths
+                y: list of event, time, grade labels
+            }
+        }
+    """
+
     data_dir = opt.data_dir
     labels, dataset = get_all_dataset(
         use_rnaseq=opt.rna,
@@ -117,11 +133,21 @@ def get_splits(opt):
 
 
 def get_all_dataset(
-    data_dir="./data",
-    use_rnaseq=False,
-    rm_missing_omics=True,
-    rm_missing_grade=True,
-):
+    data_dir: str = "./data",
+    use_rnaseq: bool = False,
+    rm_missing_omics: bool = True,
+    rm_missing_grade: bool = True,
+) -> tuple[list[str], pd.DataFrame]:
+    """
+    Loads the raw patient data/labels and aligns with omics.
+    Options for removing/imputing missing data depending on task.
+
+    Args:
+        data_dir (str): Directory containing raw data
+        use_rnaseq (bool): Whether to include RNA data
+        rm_missing_omics (bool): Whether to remove patients with missing omics
+        rm_missing_grade (bool): Whether to remove patients with missing grade
+    """
     labels = [
         "Grade",
         "censored",

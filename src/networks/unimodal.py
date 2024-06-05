@@ -35,7 +35,7 @@ class BaseEncoder(nn.Module):
         self.register_buffer("output_range", torch.FloatTensor([6]))
         self.register_buffer("output_shift", torch.FloatTensor([-3]))
 
-    def output(self, x: torch.Tensor) -> tuple:
+    def predict(self, x: torch.Tensor) -> tuple:
         grade = self.grade_clf(x)
         hazard = self.hazard_clf(x) * self.output_range + self.output_shift
         return x, grade, hazard
@@ -46,12 +46,15 @@ class BaseEncoder(nn.Module):
     def l1(self) -> torch.Tensor:
         return sum(torch.abs(W).sum() for W in self.parameters())
 
+    def n_params(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
 
 # --- Pooling ---
 class BaseAttentionPool(nn.Module):
     def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0.25) -> None:
         """
-        Computes a gated attention score over input features.
+        Computes an normalised attention score over input features.
 
         Args:
             fdim (int): Input feature dimension.
@@ -145,7 +148,7 @@ class FFN(BaseEncoder):
     def forward(self, **kwargs: torch.Tensor) -> tuple:
         x = kwargs["x_omic"]
         x = self.encoder(x)
-        return self.output(x)
+        return self.predict(x)
 
 
 # --- Graph ---
@@ -250,31 +253,20 @@ class GNN(BaseEncoder):
         x = self.encoder(x)
         if self.aggregate:
             x = self.aggregate(x, index=pat_idxs, dim_size=pat_idxs[-1].item() + 1)
-        return self.output(x)
+        return self.predict(x)
 
 
 # --- Path ---
 class ResNetClassifier(BaseEncoder):
-    def __init__(self, xdim: int = 2048, fdim: int = 32, pool: str = None, dropout: float = 0.25) -> None:
+    def __init__(self, xdim: int = 2048, pool: str = None) -> None:
         """
         Classifier for pre-extracted resnet features.
 
         Args:
             xdim (int): Input feature dimension.
-            fdim (int): Encoded feature dimension.
             pool (str): MIL aggregation method: attn, mean, None.
-            dropout (float): Dropout rate.
         """
-        super().__init__(fdim)
-        hidden = [fdim]
-
-        layers = []
-        for i in range(len(hidden)):
-            layers.append(nn.Linear(hidden[i - 1] if i > 0 else xdim, hidden[i]))
-            layers.append(nn.ReLU(True))
-            layers.append(nn.Dropout(dropout))
-
-        self.encoder = nn.Sequential(*layers)
+        super().__init__(xdim)
 
         if pool == "attn":
             self.aggregate = MaskedAttentionPool(fdim=32, hdim=32, dropout=0)
@@ -285,11 +277,12 @@ class ResNetClassifier(BaseEncoder):
         else:
             raise NotImplementedError(f"Aggregation method {pool} not implemented.")
 
+        # dfs_freeze(self, True)
+
     def forward(self, **kwargs: torch.Tensor) -> tuple:
         x = kwargs["x_path"]
-        x = self.encoder(x)
-        x = self.aggregate(x) if self.aggregate else x
-        return self.output(x)
+        # x = self.aggregate(x) if self.aggregate else x
+        return self.predict(x)
 
 
 class VGGNet(BaseEncoder):
@@ -326,7 +319,7 @@ class VGGNet(BaseEncoder):
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
-        return self.output(x)
+        return self.predict(x)
 
 
 def make_layers(cfg: list) -> nn.Module:

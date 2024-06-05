@@ -14,7 +14,9 @@ def define_tensor_fusion(opt: Namespace, mmfdim: int) -> nn.Module:
     """Reproduces the Kroneker fusion."""
 
     gate_path = (
-        False if opt.task == "grad" and opt.model in ("pathomic", "pathgraphomic") else True
+        False
+        if opt.task == "grad" and opt.model in ("pathomic", "pathgraphomic")
+        else True
     )
     gate_graph = False if opt.task == "grad" and opt.model == "graphomic" else True
     gate_omic = (
@@ -85,14 +87,22 @@ class TensorFusion(nn.Module):
         )
         return rescale_layer, gate_weight_layer, out_layer
 
-    def _rescale_and_gate(self, x: torch.Tensor, x_gate: torch.Tensor, rescale_layer: nn.Module, gate_layer: nn.Module, out_layer: nn.Module, gate: int) -> torch.Tensor:
+    def _rescale_and_gate(
+        self,
+        x: torch.Tensor,
+        x_gate: torch.Tensor,
+        rescale_layer: nn.Module,
+        gate_layer: nn.Module,
+        out_layer: nn.Module,
+        gate: int,
+    ) -> torch.Tensor:
         """
         Rescales and gates a modality.
 
         NOTE: Gating behaviour has been changed from the paper.
         Specifically, the paper does not apply the rescaling layer if the gate is off.
         This would result in an error if a mode is rescaled but not gated, as the out layer
-        expects a rescaled input. This implementation applies the rescaling layer regardless 
+        expects a rescaled input. This implementation applies the rescaling layer regardless
         of the gate state, meaning that ungated modalities undergo an additional transformation
         vs the paper's implementation.
         """
