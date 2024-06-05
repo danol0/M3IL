@@ -13,3 +13,4 @@ wandb/*
 env.yml
 figs/*
 *.pkl
+config/*
