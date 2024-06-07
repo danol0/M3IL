@@ -164,7 +164,16 @@ def get_all_dataset(
 
     all_grade.set_index("TCGA ID", inplace=True)
 
-    assert pd.Series(all_dataset.index).equals(pd.Series(sorted(all_grade.index)))
+    all_grade['Vital status'] = all_grade['Vital status'].map({'Alive': 1, 'Deceased': 0})
+
+    all_dataset = all_dataset.sort_index()
+    all_grade = all_grade.sort_index()
+    # Sanity checks
+    assert pd.Series(all_dataset.index).equals(pd.Series(all_grade.index))
+    assert pd.Series(all_dataset["censored"]).equals(all_grade["Vital status"])
+    assert pd.Series(all_dataset["Survival months"]).equals(all_grade["Time to last followup or death (months)"])
+
+    # assert pd.Series(all_dataset.index).equals(pd.Series(sorted(all_grade.index)))
     all_dataset = all_dataset.join(
         all_grade[["Histology", "Grade", "Molecular subtype"]],
         how="inner",
@@ -198,6 +207,7 @@ def get_all_dataset(
         # keep first occurence of duplicated index
         glioma_RNAseq = glioma_RNAseq.iloc[~glioma_RNAseq.index.duplicated()]
         glioma_RNAseq.index.name = "TCGA ID"
+        print(f"Removing {all_dataset.shape[0] - glioma_RNAseq.shape[0]} patients with missing RNAseq data")
         all_dataset = all_dataset.join(glioma_RNAseq, how="inner")
 
     # Impute or remove missing data
@@ -207,6 +217,7 @@ def get_all_dataset(
         )
         all_dataset = all_dataset[all_dataset["Grade"].notna()]
     else:
+        # Impute value is irrelevant as grade is a label not a feature
         print(f"Imputing {all_dataset['Grade'].isna().sum()} missing grades with 1")
         all_dataset["Grade"] = all_dataset["Grade"].fillna(1)
 
@@ -225,8 +236,8 @@ def get_all_dataset(
         for col in all_dataset.drop(labels, axis=1).columns:
             all_dataset[col] = all_dataset[col].fillna(all_dataset[col].median())
 
-    print(f"Saving cleaned dataset to {data_dir}/omics/cleaned_dataset.csv")
-    all_dataset.to_csv(f"{data_dir}/omics/cleaned_dataset.csv")
+    # print(f"Saving cleaned dataset to {data_dir}/omics/cleaned_dataset.csv")
+    # all_dataset.to_csv(f"{data_dir}/omics/cleaned_dataset.csv")
     print(f"Total patients: {all_dataset.shape[0]}")
 
     return labels, all_dataset

@@ -113,7 +113,6 @@ def train(
         # We record all training predictions for efficient evaluation
         all_preds = make_empty_data_dict()
 
-        # Unfreeze unimodal networks after 5 epochs
         if epoch == opt.unfreeze_unimodal:
             if "pathomic" in opt.model:
                 pbar.set_description("Unfreezing omic")

@@ -32,7 +32,12 @@ def parse_args():
     parser.add_argument("--l2", type=float, default=4e-4, help="L2 weight")
     parser.add_argument("--dropout", type=float, default=0.25, help="Dropout rate")
     parser.add_argument("--adam_b1", type=float, default=0.9, help="Adam momentum")
+    parser.add_argument("--unfreeze_unimodal", type=int, default=5, help="Epoch to unfreeze")
 
+    # QBT args
+    # parser.add_argument("--n_heads", type=int, default=4)
+    # parser.add_argument("--n_queries", type=int, default=16)
+    # parser.add_argument("--transformer_layers", type=int, default=1)
     opt = parser.parse_args()
 
     if not opt.use_vggnet and not opt.pre_encoded_path:
@@ -58,8 +63,9 @@ def parse_args():
             parser.set_defaults(lr=0.0005, adam_b1=0.5)
 
     opt = parser.parse_args()
-
-    return opt, str_options(parser, opt)
+    str_opt = str_options(parser, opt)
+    print(str_opt)
+    return opt, str_opt
 
 
 # python train.py --model qbt --task grad --folds 1 --use_rna 0  --lr 0.0005

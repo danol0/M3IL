@@ -229,6 +229,8 @@ class GNN(BaseEncoder):
         return padded
 
     def forward(self, **kwargs: torch.Tensor) -> tuple:
+        # data.batch records the indices of individual graphs
+        # pat_idxs maps these back to patients for MIL aggregation
         data, pat_idxs = kwargs["x_graph"]
         data = self.normalize_graphs(data)
         x, edge_index, edge_attr, batch = (
@@ -248,7 +250,6 @@ class GNN(BaseEncoder):
                     [global_max_pool(x, batch), global_mean_pool(x, batch)], dim=1
                 )
             )
-
         x = torch.sum(torch.stack(xs), dim=0)
         x = self.encoder(x)
         if self.aggregate:
@@ -269,7 +270,7 @@ class ResNetClassifier(BaseEncoder):
         super().__init__(xdim)
 
         if pool == "attn":
-            self.aggregate = MaskedAttentionPool(fdim=32, hdim=32, dropout=0)
+            self.aggregate = MaskedAttentionPool(fdim=xdim, hdim=xdim//2, dropout=0)
         elif pool == "mean":
             self.aggregate = MaskedMeanPool()
         elif pool is None:
@@ -277,11 +278,9 @@ class ResNetClassifier(BaseEncoder):
         else:
             raise NotImplementedError(f"Aggregation method {pool} not implemented.")
 
-        # dfs_freeze(self, True)
-
     def forward(self, **kwargs: torch.Tensor) -> tuple:
         x = kwargs["x_path"]
-        # x = self.aggregate(x) if self.aggregate else x
+        x = self.aggregate(x) if self.aggregate else x
         return self.predict(x)
 
 

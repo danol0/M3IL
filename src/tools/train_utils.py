@@ -72,7 +72,6 @@ def define_model(opt):
             pool = None
             if opt.mil == 'pat':
                 pool = 'attn' if opt.attn_pool else 'mean'
-            warnings.warn("NOQA: ResNet implementation is experimental.")
             model = ResNetClassifier(pool=pool)
 
     elif any(m in opt.model for m in ("pathomic", "graphomic", "pathgraphomic")):
