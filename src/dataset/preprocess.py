@@ -52,7 +52,9 @@ def get_splits(opt: Namespace) -> dict:
                 )
         else:
             try:
-                vgg_feats = pickle.load(open(f"{data_dir}/path/resnet_features.pkl", "rb"))
+                vgg_feats = pickle.load(
+                    open(f"{data_dir}/path/resnet_features.pkl", "rb")
+                )
             except FileNotFoundError:
                 raise FileNotFoundError("Pre-extracted ResNet features not found")
 
@@ -82,7 +84,11 @@ def get_splits(opt: Namespace) -> dict:
                         (
                             np.stack(
                                 [
-                                    vgg_feats[str(k)][patch] if opt.use_vggnet else vgg_feats[patch]
+                                    (
+                                        vgg_feats[str(k)][patch]
+                                        if opt.use_vggnet
+                                        else vgg_feats[patch]
+                                    )
                                     for roi in pat2roi[pat]
                                     for patch in roi2patch[roi]
                                 ]
@@ -164,14 +170,18 @@ def get_all_dataset(
 
     all_grade.set_index("TCGA ID", inplace=True)
 
-    all_grade['Vital status'] = all_grade['Vital status'].map({'Alive': 1, 'Deceased': 0})
+    all_grade["Vital status"] = all_grade["Vital status"].map(
+        {"Alive": 1, "Deceased": 0}
+    )
 
     all_dataset = all_dataset.sort_index()
     all_grade = all_grade.sort_index()
     # Sanity checks
     assert pd.Series(all_dataset.index).equals(pd.Series(all_grade.index))
     assert pd.Series(all_dataset["censored"]).equals(all_grade["Vital status"])
-    assert pd.Series(all_dataset["Survival months"]).equals(all_grade["Time to last followup or death (months)"])
+    assert pd.Series(all_dataset["Survival months"]).equals(
+        all_grade["Time to last followup or death (months)"]
+    )
 
     # assert pd.Series(all_dataset.index).equals(pd.Series(sorted(all_grade.index)))
     all_dataset = all_dataset.join(
@@ -207,7 +217,9 @@ def get_all_dataset(
         # keep first occurence of duplicated index
         glioma_RNAseq = glioma_RNAseq.iloc[~glioma_RNAseq.index.duplicated()]
         glioma_RNAseq.index.name = "TCGA ID"
-        print(f"Removing {all_dataset.shape[0] - glioma_RNAseq.shape[0]} patients with missing RNAseq data")
+        print(
+            f"Removing {all_dataset.shape[0] - glioma_RNAseq.shape[0]} patients with missing RNAseq data"
+        )
         all_dataset = all_dataset.join(glioma_RNAseq, how="inner")
 
     # Impute or remove missing data

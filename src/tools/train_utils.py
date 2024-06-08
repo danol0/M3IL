@@ -1,5 +1,4 @@
 import os
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -11,8 +10,7 @@ from tabulate import tabulate
 
 import wandb
 from src.networks.multimodal import FlexibleFusion
-from src.networks.unimodal import (FFN, GNN, ResNetClassifier,
-                                   build_vgg19_encoder)
+from src.networks.unimodal import FFN, GNN, ResNetClassifier, build_vgg19_encoder
 from src.tools.evaluation import evaluate
 
 # from line_profiler import profile
@@ -46,32 +44,30 @@ class PathomicLoss(nn.Module):
 # --- Training ---
 def define_model(opt):
 
-    # TODO: Tidy this up
-    if 'graph' in opt.model:
-        agg = None
-        if opt.mil == "pat":
-            if 'qbt' in opt.model:
-                agg = 'collate'
-            else:
-                agg = 'attn' if opt.attn_pool else 'mean'
-        opt.graph_pool = agg
+    # define graph pooling strategy
+    if "graph" in opt.model:
+        opt.graph_pool = None
+        if opt.mil != "PFS":
+            if "qbt" in opt.model or opt.mil == "local":
+                opt.graph_pool = "collate"
+            elif opt.mil == "global":
+                opt.graph_pool = "attn" if opt.attn_pool else "mean"
 
     if opt.model == "omic":
         model = FFN(xdim=320 if opt.rna else 80, fdim=32, dropout=opt.dropout)
 
     elif opt.model == "graph":
-
         model = GNN(fdim=32, pool=opt.graph_pool, dropout=opt.dropout)
 
     elif opt.model == "path":
         if opt.use_vggnet:
-            if opt.mil == 'pat':
+            if opt.mil != "PFS":
                 raise NotImplementedError("Bagging not implemented for VGG model.")
             model = build_vgg19_encoder(fdim=32)
         else:
             pool = None
-            if opt.mil == 'pat':
-                pool = 'attn' if opt.attn_pool else 'mean'
+            if opt.mil != "PFS":
+                pool = "attn" if opt.attn_pool else "mean"
             model = ResNetClassifier(pool=pool)
 
     elif any(m in opt.model for m in ("pathomic", "graphomic", "pathgraphomic")):

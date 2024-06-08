@@ -16,10 +16,10 @@ def parse_args():
     # Experiment args
     parser.add_argument("--model", type=str, default="omic")
     parser.add_argument("--task", type=str, default="grad", choices=["multi", "surv", "grad"])
+    parser.add_argument("--mil", type=str, default='PFS', choices=['PFS', 'global', 'local'])
     parser.add_argument("--rna", type=int, default=1, help="Use RNA data")
-    parser.add_argument("--mil", type=str, default="instance", choices=["pat", "instance"])
-    parser.add_argument("--attn_pool", type=int, default=0, help="Use attention pooling")
-    parser.add_argument("--collate", type=str, default="pad", choices=["pad", "min"])
+    parser.add_argument("--attn_pool", type=int, default=0, choices=[0, 1], help="Use attention pooling")
+    parser.add_argument("--collate", type=str, default="pad", choices=["pad", "min"], help="Collation method for path data")
     parser.add_argument("--pre_encoded_path", type=int, default=1, help="Use pre-extracted VGG features")
     parser.add_argument("--use_vggnet", type=int, default=1, help="Use VGG or ResNet for path data")
 
@@ -40,8 +40,6 @@ def parse_args():
     # parser.add_argument("--transformer_layers", type=int, default=1)
     opt = parser.parse_args()
 
-    if not opt.use_vggnet and not opt.pre_encoded_path:
-        raise ValueError("Must use pre-encoded path features with ResNet")
     # Defaults that dynamically align with paper (if not overridden)
     if "omic" in opt.model and opt.task == "surv":
         parser.set_defaults(rna=1)
@@ -57,10 +55,18 @@ def parse_args():
         parser.set_defaults(l1=0)
     # NOTE: Dont like these settings but they are in the paper, only using for instance MIL
     if opt.model in ("pathomic", "graphomic", "pathgraphomic"):
-        if opt.mil == "instance":
+        if opt.mil == "PFS":
             parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
         else:
-            parser.set_defaults(lr=0.0005, adam_b1=0.5)
+            parser.set_defaults(lr=0.0005, adam_b1=0.5, n_epochs=60)
+
+    # Sanity checks
+    if not opt.use_vggnet and not opt.pre_encoded_path:
+        raise ValueError("Must use pre-encoded path features with ResNet")
+    if opt.attn_pool and opt.mil == 'PFS':
+        raise ValueError("Attention pooling requires MIL")
+    if opt.collate == "min" and opt.mil == 'local':
+        raise ValueError("Min collation not supported with local MIL")
 
     opt = parser.parse_args()
     str_opt = str_options(parser, opt)

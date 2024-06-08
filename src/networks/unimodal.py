@@ -22,7 +22,7 @@ def dfs_freeze(model, freeze: bool) -> None:
 
 
 class BaseEncoder(nn.Module):
-    def __init__(self, fdim: int) -> None:
+    def __init__(self, fdim: int, local: bool = False) -> None:
         """
         Defines output layers for downstream tasks (grade, survival).
 
@@ -30,14 +30,27 @@ class BaseEncoder(nn.Module):
             fdim (int): Processed feature dimension.
         """
         super().__init__()
-        self.grade_clf = nn.Sequential(nn.Linear(fdim, 3), nn.LogSoftmax(dim=1))
+        self.grade_clf = nn.Sequential(nn.Linear(fdim, 3), nn.LogSoftmax(dim=-1))
         self.hazard_clf = nn.Sequential(nn.Linear(fdim, 1), nn.Sigmoid())
         self.register_buffer("output_range", torch.FloatTensor([6]))
         self.register_buffer("output_shift", torch.FloatTensor([-3]))
+        self.local = local
 
-    def predict(self, x: torch.Tensor) -> tuple:
+    def predict(self, x: torch.Tensor, mask: torch.Tensor = None) -> tuple:
         grade = self.grade_clf(x)
         hazard = self.hazard_clf(x) * self.output_range + self.output_shift
+
+        if self.local:
+            if mask is None:
+                mask = torch.any(x != 0, dim=-1)
+            mask = mask.unsqueeze(-1)
+            grade = torch.where(
+                mask, grade, torch.tensor(-float("Inf"), device=grade.device)
+            )
+            hazard = torch.where(mask, hazard, torch.tensor(0.0, device=hazard.device))
+            grade = torch.max(grade, dim=1)[0]
+            hazard = MaskedMeanPool()(hazard)
+
         return x, grade, hazard
 
     def freeze(self, freeze: bool) -> None:
@@ -98,7 +111,7 @@ class GraphAttentionPool(BaseAttentionPool):
     def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0.25) -> None:
         """
         Performs attention pooling of graph features via an index vector.
-        (n_graphs, features) -> (batch, pooled_features)
+        (n_graphs, features) -> (batch_size, pooled_features)
 
         Adapted from: https://pytorch-geometric.readthedocs.io/en/1.3.1/_modules/torch_geometric/nn/glob/attention.html
         """
@@ -119,7 +132,7 @@ class MaskedMeanPool(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         mask = torch.any(x != 0, dim=-1)
-        assert torch.all(mask.any(dim=1)), "Empty input detected."
+        assert torch.all(mask.any(dim=1)), "All-zero batch detected."
         return x.sum(dim=1) / mask.sum(dim=1, keepdim=True)
 
 
@@ -145,9 +158,13 @@ class FFN(BaseEncoder):
 
         self.encoder = nn.Sequential(*layers)
 
-    def forward(self, **kwargs: torch.Tensor) -> tuple:
+    def get_latents(self, **kwargs: torch.Tensor) -> tuple:
         x = kwargs["x_omic"]
         x = self.encoder(x)
+        return x
+
+    def forward(self, **kwargs: torch.Tensor) -> tuple:
+        x = self.get_latents(**kwargs)
         return self.predict(x)
 
 
@@ -171,7 +188,7 @@ class GNN(BaseEncoder):
             pool (str): MIL aggregation method: collate, attn, mean, None.
             dropout (int): Dropout rate.
         """
-        super().__init__(fdim)
+        super().__init__(fdim, local=True if pool == "collate" else False)
 
         hidden = [xdim, hdim, hdim]
 
@@ -188,7 +205,6 @@ class GNN(BaseEncoder):
             torch.nn.Linear(hdim, fdim),
             nn.ReLU(True),
         )
-
         if pool == "collate":
             self.aggregate = self.collate_graphs
         elif pool == "attn":
@@ -228,10 +244,10 @@ class GNN(BaseEncoder):
         padded = pad_sequence(graphs, batch_first=True, padding_value=0)
         return padded
 
-    def forward(self, **kwargs: torch.Tensor) -> tuple:
+    def get_latents(self, **kwargs: torch.Tensor) -> tuple:
+        data, pat_idxs = kwargs["x_graph"]
         # data.batch records the indices of individual graphs
         # pat_idxs maps these back to patients for MIL aggregation
-        data, pat_idxs = kwargs["x_graph"]
         data = self.normalize_graphs(data)
         x, edge_index, edge_attr, batch = (
             data.x,
@@ -254,6 +270,10 @@ class GNN(BaseEncoder):
         x = self.encoder(x)
         if self.aggregate:
             x = self.aggregate(x, index=pat_idxs, dim_size=pat_idxs[-1].item() + 1)
+        return x
+
+    def forward(self, **kwargs: torch.Tensor) -> tuple:
+        x = self.get_latents(**kwargs)
         return self.predict(x)
 
 
@@ -270,7 +290,7 @@ class ResNetClassifier(BaseEncoder):
         super().__init__(xdim)
 
         if pool == "attn":
-            self.aggregate = MaskedAttentionPool(fdim=xdim, hdim=xdim//2, dropout=0)
+            self.aggregate = MaskedAttentionPool(fdim=xdim, hdim=xdim // 2, dropout=0)
         elif pool == "mean":
             self.aggregate = MaskedMeanPool()
         elif pool is None:
@@ -312,12 +332,16 @@ class VGGNet(BaseEncoder):
 
         dfs_freeze(self.conv_layers, True)
 
-    def forward(self, **kwargs: torch.Tensor) -> tuple:
+    def get_latents(self, **kwargs: torch.Tensor) -> tuple:
         x = kwargs["x_path"]
         x = self.conv_layers(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
+        return x
+
+    def forward(self, **kwargs: torch.Tensor) -> tuple:
+        x = self.get_latents(**kwargs)
         return self.predict(x)
 
 

@@ -11,12 +11,12 @@ from torchvision import transforms
 
 
 def define_dataset(opt) -> Dataset:
-    if opt.mil == "instance":
-        return instanceLevelDataset
-    elif opt.mil == "pat":
-        return patientLevelDataset
+    if opt.mil == "PFS":
+        return psuedoSupervisedDataset
+    elif opt.mil in ("global", "local"):
+        return MMMILDataset
     else:
-        raise NotImplementedError(f"MIL type {opt.mil} not implemented")
+        raise NotImplementedError(f"MIL type {opt.mil} not implemented.")
 
 
 def get_transforms() -> transforms.Compose:
@@ -36,7 +36,7 @@ def get_transforms() -> transforms.Compose:
 
 
 # --- Dataset Class ---
-class patientLevelDataset(Dataset):
+class MMMILDataset(Dataset):
     def __init__(self, data: Dict, split: int, opt: Namespace) -> None:
         """
         Defines a multimodal pathology dataset bagged at the patient level.
@@ -94,7 +94,7 @@ class patientLevelDataset(Dataset):
         return len(self.patnames)
 
 
-class instanceLevelDataset(Dataset):
+class psuedoSupervisedDataset(Dataset):
     def __init__(self, data: Dict, split: int, opt: Namespace) -> None:
         """
         Defines a multimodal pathology dataset of instance level combinations.
@@ -113,7 +113,7 @@ class instanceLevelDataset(Dataset):
         for pat in self.data.keys():
             num_path = len(self.data[pat]["x_path"]) if "path" in self.model else 1
             num_graph = len(self.data[pat]["x_graph"]) if "graph" in self.model else 1
-            if 'pathgraph' in self.model:
+            if "pathgraph" in self.model:
                 assert num_path == num_graph * 9
                 combinations.extend([(pat, i, i // 9) for i in range(num_path)])
             else:
@@ -155,7 +155,7 @@ class instanceLevelDataset(Dataset):
 # --- Collate functions ---
 def define_collate_fn(opt: Namespace) -> callable:
     # Only path requires collating (graphs are collated through nested batches)
-    if opt.mil == "instance" or "path" not in opt.model:
+    if opt.mil == "PFS" or "path" not in opt.model:
         return lambda batch: mixed_collate(batch, opt.device)
     else:
         if opt.collate == "min":

@@ -72,10 +72,25 @@ class TensorFusion(nn.Module):
     def _tensor_fusion(self, tensors: list) -> torch.Tensor:
         """Kronecker product fusion of a list of encoded modalities."""
 
-        fused = tensors[0]
-        for t in tensors[1:]:
-            fused = torch.bmm(fused.unsqueeze(2), t.unsqueeze(1)).flatten(start_dim=1)
-        return fused
+        if tensors[0].dim() == 2:
+            if len(tensors) == 2:
+                f = torch.einsum("bi,bj->bij", *tensors).flatten(start_dim=1)
+            elif len(tensors) == 3:
+                f = torch.einsum("bi,bj,bk->bijk", *tensors).flatten(start_dim=1)
+            else:
+                raise NotImplementedError("Only bimodal and trimodal fusion supported.")
+
+        elif tensors[0].dim() == 3:
+            if len(tensors) == 2:
+                f = torch.einsum("bsi,bsj->bsij", *tensors).flatten(start_dim=2)
+            elif len(tensors) == 3:
+                f = torch.einsum("bsi,bsj,bsk->bsijk", *tensors).flatten(start_dim=2)
+            else:
+                raise NotImplementedError("Only bimodal and trimodal fusion supported.")
+        else:
+            raise NotImplementedError("Only 2D and 3D tensors supported.")
+
+        return f
 
     def _create_gate_layers(self, scaled_dim: int) -> tuple:
         """Creates layers required for feature gating."""
@@ -106,14 +121,16 @@ class TensorFusion(nn.Module):
         of the gate state, meaning that ungated modalities undergo an additional transformation
         vs the paper's implementation.
         """
-        o = rescale_layer(x)  # fdim -> scaled_dim
-        w = self.sigmoid(gate_layer(x, x_gate)) if gate else 1  # fdim -> scaled_dim
-        o = out_layer(w * o)  # scaled_dim -> scaled_dim
+        o = rescale_layer(x)  # (*, fdim) -> (*, scaled_dim)
+        w = (
+            self.sigmoid(gate_layer(x, x_gate)) if gate else 1
+        )  # (*, fdim) -> (*, scaled_dim)
+        o = out_layer(w * o)  # (*, scaled_dim) -> (*, scaled_dim)
         return o
 
     def _append_one(self, x: torch.Tensor) -> torch.Tensor:
-        _one = torch.ones((x.shape[0], 1), device=self.device)
-        return torch.cat((x, _one), dim=1)
+        _one = torch.ones((*x.shape[:-1], 1), device=self.device)
+        return torch.cat((x, _one), dim=-1)
 
 
 class Trimodal(TensorFusion):
@@ -184,6 +201,10 @@ class Trimodal(TensorFusion):
 
     def forward(self, **kwargs: dict) -> torch.Tensor:
         f_path, f_graph, f_omic = kwargs["f_path"], kwargs["f_graph"], kwargs["f_omic"]
+
+        # if f_path.dim() == 3 and f_omic.dim() == 2:
+        #     f_omic = f_omic.unsqueeze(1)
+
         p = self._rescale_and_gate(
             f_path,
             f_omic,
@@ -269,10 +290,14 @@ class Bimodal(TensorFusion):
     def forward(self, **kwargs: dict) -> torch.Tensor:
         vec1 = kwargs["f_path"] if kwargs["f_path"] is not None else kwargs["f_graph"]
         # Omic is always present and takes the second position
-        vec2 = kwargs["f_omic"]
+        f_omic = kwargs["f_omic"]
+
+        if vec1.dim() == 3 and f_omic.dim() == 2:
+            f_omic = f_omic.unsqueeze(1)
+
         o1 = self._rescale_and_gate(
             vec1,
-            vec2,
+            f_omic,
             self.rescale_1,
             self.gate_weight_1,
             self.out_1,
@@ -280,7 +305,7 @@ class Bimodal(TensorFusion):
         )
 
         o2 = self._rescale_and_gate(
-            vec2,
+            f_omic,
             vec1,
             self.rescale_2,
             self.gate_weight_2,

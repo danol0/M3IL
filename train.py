@@ -17,9 +17,6 @@ from src.dataset.preprocess import get_splits
 from src.tools.evaluation import make_empty_data_dict
 from src.tools.options import parse_args
 
-# from line_profiler import profile
-# from torch.profiler import profile, record_function, ProfilerActivity
-
 
 def CV_Main() -> None:
     """Cross-validates a model specified by command line args."""
@@ -44,11 +41,9 @@ def CV_Main() -> None:
             print(model, f"\n{model.n_params()} trainable parameters")
 
         with configure_wandb(opt, k):
-            model, metrics, preds = train(model, split_data[k], accelerator, opt)
+            metrics = train(model, split_data[k], accelerator, opt)
 
         metrics_list = log_fold(metrics_list, metrics, k)
-        utils.save_model(model, opt, preds) if not opt.dry_run else None
-        accelerator.free_memory()
 
     # --- End CV ---
     rtable = utils.make_results_table(metrics_list)
@@ -67,7 +62,7 @@ def train(
     accelerator: Accelerator,
     opt: Namespace,
     verbose: bool = True,
-):
+) -> Dict:
     """
     Train a model for a single split.
 
@@ -170,13 +165,14 @@ def train(
         }
     # Dataframe of all train/test predictions
     all_preds = pd.concat(preds)
+    utils.save_model(model, opt, all_preds) if not opt.dry_run else None
 
     # --- Cleanup ---
     model, train_loader, test_loader, optim, scheduler = accelerator.clear(
         model, train_loader, test_loader, optim, scheduler
     )
 
-    return model, metrics, all_preds
+    return metrics
 
 
 def init_environment(opt: Namespace) -> Accelerator:
@@ -185,7 +181,7 @@ def init_environment(opt: Namespace) -> Accelerator:
     utils.set_seed(2019)
     os.environ["WANDB_SILENT"] = "true"
     cpu = False if opt.model == "path" else True
-    accelerator = Accelerator(cpu=True, step_scheduler_with_optimizer=False)
+    accelerator = Accelerator(cpu=cpu, step_scheduler_with_optimizer=False)
     opt.device = accelerator.device
     print(f"Device: {opt.device}")
     return accelerator
@@ -197,7 +193,7 @@ def configure_wandb(opt: Namespace, k: int) -> wandb.run:
     return wandb.init(
         reinit=True,
         mode="disabled" if opt.dry_run else "online",
-        project="mmmil",
+        project="FormalMIL",
         config=opt,
         group=opt.group,
         name=f"{opt.group}_{k}",

@@ -70,7 +70,7 @@ def evaluate(
     all_preds = get_all_preds(model, data_loader) if precomp is None else precomp
 
     # If instance level MIL, aggregate predictions by patient
-    if opt.mil == "instance":
+    if opt.mil == "PFS":
         # Aggregrate by patient
         all_preds = all_preds.groupby("patname").agg(
             {
