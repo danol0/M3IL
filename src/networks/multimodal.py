@@ -66,7 +66,7 @@ class FlexibleFusion(BaseEncoder):
             self.aggregate = nn.Identity()
             if opt.mil == "global":
                 self.aggregate = (
-                    MaskedAttentionPool(fdim=32, hdim=16, dropout=0)
+                    MaskedAttentionPool(fdim=fdim, hdim=fdim // 2, dropout=opt.dropout)
                     if opt.attn_pool
                     else MaskedMeanPool()
                 )

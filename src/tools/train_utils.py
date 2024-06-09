@@ -37,8 +37,8 @@ class PathomicLoss(nn.Module):
         _zero = torch.tensor(0.0).to(self.device)
         nll = F.nll_loss(grade_pred, grade) if self.nll else _zero
         cox = self.cox_loss(time, event, hazard_pred) if self.cox else _zero
-        l1 = model.l1() if self.l1 else _zero
-        return nll + cox + l1 * self.l1
+        l1 = model.l1() * self.l1 if self.l1 else _zero
+        return nll + cox + l1
 
 
 # --- Training ---

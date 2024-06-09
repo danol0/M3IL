@@ -35,6 +35,7 @@ def CV_Main() -> None:
             continue
 
         opt.k = k
+        utils.set_seed(2019)
         model = utils.define_model(opt)
 
         if k == 1:
@@ -178,7 +179,6 @@ def train(
 def init_environment(opt: Namespace) -> Accelerator:
     """Initialises global run settings."""
 
-    utils.set_seed(2019)
     os.environ["WANDB_SILENT"] = "true"
     cpu = False if opt.model == "path" else True
     accelerator = Accelerator(cpu=cpu, step_scheduler_with_optimizer=False)
