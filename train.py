@@ -6,15 +6,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
-from tabulate import tabulate
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import src.tools.train_utils as utils
-import wandb
 from src.dataset.loaders import define_collate_fn, define_dataset
 from src.dataset.preprocess import get_splits
-from src.tools.evaluation import make_empty_data_dict
+from src.tools.evaluation import make_empty_data_dict, evaluate, calculate_metrics
 from src.tools.options import parse_args
 
 
@@ -22,15 +20,21 @@ def CV_Main() -> None:
     """Cross-validates a model specified by command line args."""
 
     opt, str_opt = parse_args()
-    accelerator = init_environment(opt)
+    accelerator = utils.init_accelerator(opt)
     split_data = get_splits(opt)
-    assign_ckptdir_and_group(opt)
+    utils.assign_ckptdir_and_group(opt)
 
-    metrics_list = []
+    cv_metrics = []
     # --- Cross-validation Loop ---
     for k in range(1, opt.folds + 1):
 
         if opt.resume and os.path.exists(f"{opt.ckpt_dir}/{opt.model}_{k}.pt"):
+            # Get metrics from previous run
+            fold_preds = pd.read_csv(f"{opt.ckpt_dir}/results/{opt.model}_{k}.csv")
+            mtest = calculate_metrics(
+                fold_preds[fold_preds["split"] == "Test"], opt.task
+            )
+            cv_metrics.append([mtest["accuracy"], mtest["auc"], mtest["c_indx"]])
             print(f"Skipping split {k}")
             continue
 
@@ -41,13 +45,13 @@ def CV_Main() -> None:
         if k == 1:
             print(model, f"\n{model.n_params()} trainable parameters")
 
-        with configure_wandb(opt, k):
+        with utils.configure_wandb(opt, k):
             metrics = train(model, split_data[k], accelerator, opt)
 
-        metrics_list = log_fold(metrics_list, metrics, k)
+        cv_metrics = utils.log_fold(cv_metrics, metrics, k)
 
     # --- End CV ---
-    rtable = utils.make_results_table(metrics_list)
+    rtable = utils.make_cv_results_table(cv_metrics)
     print(rtable)
 
     if not opt.dry_run:
@@ -62,7 +66,7 @@ def train(
     split_data: Dict,
     accelerator: Accelerator,
     opt: Namespace,
-    verbose: bool = True,
+    verbose: bool = False,
 ) -> Dict:
     """
     Train a model for a single split.
@@ -106,7 +110,7 @@ def train(
     for epoch in pbar:
         model.train()
         train_loss = 0
-        # We record all training predictions for efficient evaluation
+        # Record all training predictions for efficient evaluation
         all_preds = make_empty_data_dict()
 
         if epoch == opt.unfreeze_unimodal:
@@ -128,44 +132,49 @@ def train(
             optim.step()
 
             # --- Logging ---
-            train_loss += loss.item() * len(patname)
-            if not verbose:
-                continue
-            all_preds["patname"].extend(patname)
-            for i in range(3):
-                all_preds[f"grade_p_{i}"].extend(
-                    grade_pred[:, i].detach().cpu().numpy()
+            if verbose:
+                train_loss += loss.item() * len(patname)
+                all_preds["patname"].extend(patname)
+                for i in range(3):
+                    all_preds[f"grade_p_{i}"].extend(
+                        grade_pred[:, i].detach().cpu().numpy()
+                    )
+                all_preds["hazard_pred"].extend(
+                    hazard_pred[:, 0].detach().cpu().numpy()
                 )
-            all_preds["hazard_pred"].extend(hazard_pred[:, 0].detach().cpu().numpy())
-            for key, value in {"grade": grade, "event": event, "time": time}.items():
-                all_preds[key].extend(value.cpu().numpy())
+                for key, value in {
+                    "grade": grade,
+                    "event": event,
+                    "time": time,
+                }.items():
+                    all_preds[key].extend(value.cpu().numpy())
 
         # --- End of epoch ---
         scheduler.step()
-        if not verbose:
-            continue
-        train_loss /= samples
-        desc = utils.log_epoch(
-            epoch, model, train_loader, test_loader, loss_fn, opt, train_loss, all_preds
-        )
-        pbar.set_description(desc)
+        if verbose:
+            train_loss /= samples
+            desc = utils.log_epoch(
+                epoch,
+                model,
+                train_loader,
+                test_loader,
+                loss_fn,
+                opt,
+                train_loss,
+                all_preds,
+            )
+            pbar.set_description(desc)
 
     # --- Evaluation ---
-    metrics, preds = {}, []
+    all_metrics, all_preds = {}, []
     for loader, split in [(train_loader, "Train"), (test_loader, "Test")]:
-        loss, accuracy, auc, c_indx, all_preds = utils.evaluate(
+        split_metrics, split_preds = evaluate(
             model, loader, loss_fn, opt, return_preds=True
         )
-        all_preds["split"] = split
-        preds.append(all_preds)
-        metrics[split] = {
-            "loss": loss,
-            "accuracy": accuracy,
-            "auc": auc,
-            "c_indx": c_indx,
-        }
-    # Dataframe of all train/test predictions
-    all_preds = pd.concat(preds)
+        split_preds["split"] = split
+        all_preds.append(split_preds)
+        all_metrics[split] = split_metrics
+    all_preds = pd.concat(all_preds)
     utils.save_model(model, opt, all_preds) if not opt.dry_run else None
 
     # --- Cleanup ---
@@ -173,60 +182,7 @@ def train(
         model, train_loader, test_loader, optim, scheduler
     )
 
-    return metrics
-
-
-def init_environment(opt: Namespace) -> Accelerator:
-    """Initialises global run settings."""
-
-    os.environ["WANDB_SILENT"] = "true"
-    cpu = False if opt.model == "path" else True
-    accelerator = Accelerator(cpu=cpu, step_scheduler_with_optimizer=False)
-    opt.device = accelerator.device
-    print(f"Device: {opt.device}")
-    return accelerator
-
-
-def configure_wandb(opt: Namespace, k: int) -> wandb.run:
-    """Initialise a WandB run that tracks a single fold as part of a CV group."""
-
-    return wandb.init(
-        reinit=True,
-        mode="disabled" if opt.dry_run else "online",
-        project="FormalMIL",
-        config=opt,
-        group=opt.group,
-        name=f"{opt.group}_{k}",
-    )
-
-
-def assign_ckptdir_and_group(opt: Namespace) -> None:
-    """Assigns checkpoint directory and CV group."""
-
-    rna = "_rna" if (opt.rna and "omic" in opt.model) else ""
-    attn = "_attn" if opt.attn_pool else ""
-    # Ignore MIL for omic as there is only 1 instance per patient
-    if opt.model == "omic":
-        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}"
-        opt.group = f"{opt.task}_{opt.model}{rna}"
-    else:
-        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}_{opt.mil}{attn}"
-        opt.group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{attn}"
-    print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
-
-
-def log_fold(metrics_list: list, metrics: Dict, k: int) -> list:
-    """Log metrics for a single fold and return updated metrics list."""
-
-    fold_table = [[f"Split {k}", "Loss", "Accuracy", "AUC", "C-Index"]]
-    for split, m in metrics.items():
-        fold_table.append([split, m["loss"], m["accuracy"], m["auc"], m["c_indx"]])
-    tkwgs = {"headers": "firstrow", "tablefmt": "rounded_grid", "floatfmt": ".3f"}
-    print(tabulate(fold_table, **tkwgs))
-
-    mtest = metrics["Test"]
-    metrics_list.append([mtest["accuracy"], mtest["auc"], mtest["c_indx"]])
-    return metrics_list
+    return all_metrics
 
 
 if __name__ == "__main__":

@@ -237,9 +237,9 @@ def get_all_dataset(
         print(
             f"Removing {all_dataset.isna().any(axis=1).sum()} patients with missing omics"
         )
-        # NOTE: This is handled differently to the paper. 3 patients with missing omics but
-        # not missing moltype. They are imputed in the paper, but removed here.
-        # TODO: Check this and write it up
+        # NOTE: This is handled differently to the paper. There are 3 patients with no omics data,
+        # but as they have a moltype they are imputed for omic models (in grade classification tasks).
+        # Median imputation for omics means all 1s. As such they are removed here.
         all_dataset = all_dataset[all_dataset.notna().all(axis=1)]
     else:
         print(
@@ -248,8 +248,6 @@ def get_all_dataset(
         for col in all_dataset.drop(labels, axis=1).columns:
             all_dataset[col] = all_dataset[col].fillna(all_dataset[col].median())
 
-    # print(f"Saving cleaned dataset to {data_dir}/omics/cleaned_dataset.csv")
-    # all_dataset.to_csv(f"{data_dir}/omics/cleaned_dataset.csv")
     print(f"Total patients: {all_dataset.shape[0]}")
 
     return labels, all_dataset

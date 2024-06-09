@@ -46,6 +46,41 @@ def get_all_preds(
     return pd.DataFrame(all_preds)
 
 
+def calculate_metrics(predictions: pd.DataFrame, task: str) -> dict:
+    """
+    Calculates task relevant metrics for a given set of predictions.
+
+    Args:
+        predictions (pd.DataFrame): DataFrame of predictions.
+        task (str): Task for which to calculate metrics.
+    """
+    assert predictions.index.is_unique
+
+    grade_logits = predictions[["grade_p_0", "grade_p_1", "grade_p_2"]].values
+
+    accuracy = (
+        (grade_logits.argmax(axis=1) == predictions["grade"]).mean()
+        if task != "surv"
+        else 0
+    )
+    auc = (
+        roc_auc_score(
+            pd.get_dummies(predictions["grade"]), grade_logits, average="micro"
+        )
+        if task != "surv"
+        else 0
+    )
+    c_indx = (
+        concordance_index(
+            predictions["time"], -predictions["hazard_pred"], predictions["event"]
+        )
+        if task != "grad"
+        else 0
+    )
+
+    return {"accuracy": accuracy, "auc": auc, "c_indx": c_indx}
+
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
@@ -54,7 +89,7 @@ def evaluate(
     opt: Namespace,
     precomp: pd.DataFrame = None,
     return_preds: bool = False,
-) -> tuple:
+) -> dict:
     """
     Evaluates a model against task relevant metrics.
 
@@ -64,14 +99,13 @@ def evaluate(
         loss_fn (nn.Module): Loss function for evaluation.
         opt (Namespace): Command line arguments.
         precomp (pd.DataFrame): Precomputed predictions for evaluation.
-        return_preds (bool): Whether to return the predictions DataFrame.
+        return_preds (bool): Whether to return a DataFrame of all predictions.
     """
 
     all_preds = get_all_preds(model, data_loader) if precomp is None else precomp
 
     # If instance level MIL, aggregate predictions by patient
     if opt.mil == "PFS":
-        # Aggregrate by patient
         all_preds = all_preds.groupby("patname").agg(
             {
                 "grade_p_0": "max",
@@ -84,41 +118,24 @@ def evaluate(
             }
         )
 
-    assert all_preds.index.is_unique
-
-    grade_logits = all_preds[["grade_p_0", "grade_p_1", "grade_p_2"]].values
-
-    accuracy = (
-        (grade_logits.argmax(axis=1) == all_preds["grade"]).mean()
-        if opt.task != "surv"
-        else 0
-    )
-    auc = (
-        roc_auc_score(pd.get_dummies(all_preds["grade"]), grade_logits, average="micro")
-        if opt.task != "surv"
-        else 0
-    )
-    c_indx = (
-        concordance_index(
-            all_preds["time"], -all_preds["hazard_pred"], all_preds["event"]
-        )
-        if opt.task != "grad"
-        else 0
-    )
-
+    metrics = calculate_metrics(all_preds, opt.task)
     loss = 0
     if precomp is None:
         loss_inputs = [
-            (
-                torch.tensor(all_preds[key].values)
-                if isinstance(key, str)
-                else torch.tensor(key)
-            )
-            for key in ["grade", "time", "event", grade_logits, "hazard_pred"]
+            (torch.tensor(all_preds[key].values))
+            for key in [
+                "grade",
+                "time",
+                "event",
+                ["grade_p_0", "grade_p_1", "grade_p_2"],
+                "hazard_pred",
+            ]
         ]
         loss = loss_fn(model, *loss_inputs).item()
 
+    metrics["loss"] = loss
+
     if return_preds:
-        return loss, accuracy, auc, c_indx, all_preds
+        return metrics, all_preds
     else:
-        return loss, accuracy, auc, c_indx
+        return metrics

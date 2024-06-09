@@ -25,9 +25,7 @@ def print_load(ckpt: str, device: torch.device) -> dict:
 
 
 class FlexibleFusion(BaseEncoder):
-    def __init__(
-        self, opt: Namespace, fdim: int = 32, mmfdim: int = 64
-    ) -> None:
+    def __init__(self, opt: Namespace, fdim: int = 32, mmfdim: int = 64) -> None:
         """
         Dynamic multimodal fusion of path, graph and omics data:
         1. Encodes each modality with (pre-trained) modality-specific encoders
@@ -39,7 +37,7 @@ class FlexibleFusion(BaseEncoder):
             fdim (int): Dimension of feature vector for each modality.
             mmfdim (int): Dimension of fused multimodal feature vector.
         """
-        self.local = (opt.mil == "local")
+        self.local = opt.mil == "local"
         super().__init__(mmfdim, local=self.local)
         self.device = opt.device
 

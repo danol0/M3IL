@@ -1,4 +1,6 @@
 import os
+from argparse import Namespace
+from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -6,19 +8,47 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim.lr_scheduler as lr_scheduler
-from tabulate import tabulate
-
 import wandb
+from accelerate import Accelerator
+from tabulate import tabulate
+from torch.utils.data import DataLoader
+
 from src.networks.multimodal import FlexibleFusion
 from src.networks.unimodal import FFN, GNN, ResNetClassifier, build_vgg19_encoder
 from src.tools.evaluation import evaluate
 
-# from line_profiler import profile
+
+# --- General ---
+def set_seed(seed: int) -> None:
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    np.random.seed(seed)
 
 
-# Predictions are not independent in Coxloss; calculating over batch != whole dataset
+def mkdir(path: str) -> str:
+    if not os.path.exists(path):
+        os.makedirs(path)
+    return path
+
+
+def save_model(model: nn.Module, opt: Namespace, predictions: pd.DataFrame) -> None:
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "opt": opt,
+        },
+        os.path.join(mkdir(f"{opt.ckpt_dir}"), f"{opt.model}_{opt.k}.pt"),
+    )
+    predictions.to_csv(
+        os.path.join(mkdir(f"{opt.ckpt_dir}/results"), f"{opt.model}_{opt.k}.csv")
+    )
+
+
+# --- Loss ---
 class PathomicLoss(nn.Module):
-    def __init__(self, opt):
+    def __init__(self, opt: Namespace) -> None:
+        """Loss function for survival and grade prediction tasks."""
+
         super().__init__()
         self.nll = False if opt.task == "surv" else True
         self.cox = False if opt.task == "grad" else True
@@ -26,14 +56,26 @@ class PathomicLoss(nn.Module):
         self.device = opt.device
 
     @staticmethod
-    def cox_loss(survtime, event, hazard_pred):
+    def cox_loss(
+        survtime: torch.Tensor, event: torch.Tensor, hazard_pred: torch.Tensor
+    ) -> torch.Tensor:
+        """Source: https://github.com/traversc/cox-nnet"""
+        # Predictions are not independent in Coxloss; calculating over batch != whole dataset
         R_mat = (survtime.repeat(len(survtime), 1) >= survtime.unsqueeze(1)).int()
         theta = hazard_pred.view(-1)
         exp_theta = theta.exp()
         loss_cox = -torch.mean((theta - (exp_theta * R_mat).sum(dim=1).log()) * event)
         return loss_cox
 
-    def forward(self, model, grade, time, event, grade_pred, hazard_pred):
+    def forward(
+        self,
+        model: nn.Module,
+        grade: torch.Tensor,
+        time: torch.Tensor,
+        event: torch.Tensor,
+        grade_pred: torch.Tensor,
+        hazard_pred: torch.Tensor,
+    ) -> torch.Tensor:
         _zero = torch.tensor(0.0).to(self.device)
         nll = F.nll_loss(grade_pred, grade) if self.nll else _zero
         cox = self.cox_loss(time, event, hazard_pred) if self.cox else _zero
@@ -42,9 +84,10 @@ class PathomicLoss(nn.Module):
 
 
 # --- Training ---
-def define_model(opt):
+def define_model(opt: Namespace) -> nn.Module:
+    """Defines the model architecture based on command line arguments."""
 
-    # define graph pooling strategy
+    # Define graph pooling strategy
     if "graph" in opt.model:
         opt.graph_pool = None
         if opt.mil != "PFS":
@@ -62,7 +105,7 @@ def define_model(opt):
     elif opt.model == "path":
         if opt.use_vggnet:
             if opt.mil != "PFS":
-                raise NotImplementedError("Bagging not implemented for VGG model.")
+                raise NotImplementedError("MIL not implemented for VGG model.")
             model = build_vgg19_encoder(fdim=32)
         else:
             pool = None
@@ -77,7 +120,11 @@ def define_model(opt):
     return model
 
 
-def define_scheduler(opt, optimizer):
+def define_scheduler(
+    opt: Namespace, optimizer: torch.optim.Optimizer
+) -> lr_scheduler._LRScheduler:
+    """Defines the linearly decaying learning rate scheduler used in the original paper."""
+
     def lambda_rule(epoch):
         lr_l = 1.0 - max(0, epoch - opt.lr_fix) / float(opt.n_epochs - opt.lr_fix)
         return lr_l
@@ -85,32 +132,9 @@ def define_scheduler(opt, optimizer):
     return lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_rule)
 
 
-def mkdir(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
-    return path
+def make_cv_results_table(metrics_list: list) -> str:
+    """Makes a table summarising CV performance."""
 
-
-def save_model(model, opt, preds):
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "opt": opt,
-        },
-        os.path.join(mkdir(f"{opt.ckpt_dir}"), f"{opt.model}_{opt.k}.pt"),
-    )
-    preds.to_csv(
-        os.path.join(mkdir(f"{opt.ckpt_dir}/results"), f"{opt.model}_{opt.k}.csv")
-    )
-
-
-def set_seed(seed: int) -> None:
-    torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
-    np.random.seed(seed)
-
-
-def make_results_table(metrics_list):
     df = pd.DataFrame(
         metrics_list,
         columns=["Accuracy", "AUC", "C-Index"],
@@ -124,8 +148,17 @@ def make_results_table(metrics_list):
 
 
 def log_epoch(
-    epoch, model, train_loader, test_loader, loss_fn, opt, train_loss, all_preds
-):
+    epoch: int,
+    model: nn.Module,
+    train_loader: DataLoader,
+    test_loader: DataLoader,
+    loss_fn: nn.Module,
+    opt: Namespace,
+    train_loss: float,
+    all_preds: Dict,
+) -> str:
+    """Log epoch performance to WandB and return a description string for tqdm."""
+
     _, train_acc, train_auc, c_train = evaluate(
         model, train_loader, loss_fn, opt, pd.DataFrame(all_preds)
     )
@@ -148,3 +181,61 @@ def log_epoch(
         wandb.log({"c_train": c_train, "c_test": c_test})
 
     return desc
+
+
+def init_accelerator(opt: Namespace) -> Accelerator:
+    """Initialises an accelerator on the correct device."""
+
+    # Only use MPS for path
+    cpu = False if opt.model == "path" or torch.cuda.is_available() else True
+    accelerator = Accelerator(cpu=cpu, step_scheduler_with_optimizer=False)
+    opt.device = accelerator.device
+    print(f"Device: {opt.device}")
+    return accelerator
+
+
+def configure_wandb(opt: Namespace, k: int) -> wandb.run:
+    """Initialise a WandB run that tracks a single fold as part of a CV group."""
+
+    os.environ["WANDB_SILENT"] = "true"
+    return wandb.init(
+        reinit=True,
+        mode="disabled" if opt.dry_run else "online",
+        project="FormalMIL",
+        config=opt,
+        group=opt.group,
+        name=f"{opt.group}_{k}",
+    )
+
+
+def assign_ckptdir_and_group(opt: Namespace) -> None:
+    """Assigns checkpoint directory and CV group for WandB."""
+
+    rna = "_rna" if (opt.rna and "omic" in opt.model) else ""
+    attn = "_attn" if opt.attn_pool else ""
+    # Ignore MIL for omic as there is only 1 instance per patient
+    if opt.model == "omic":
+        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}"
+        opt.group = f"{opt.task}_{opt.model}{rna}"
+    else:
+        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}_{opt.mil}{attn}"
+        opt.group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{attn}"
+    print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
+
+
+def log_fold(cv_metrics: list, fold_metrics: Dict, k: int) -> list:
+    """Print a table summarising fold performance and update running CV list."""
+
+    fold_table = [[f"Split {k}", "Loss", "Accuracy", "AUC", "C-Index"]]
+    for split, mdict in fold_metrics.items():
+        fold_table.append(
+            [split, mdict["loss"], mdict["accuracy"], mdict["auc"], mdict["c_indx"]]
+        )
+
+    tkwgs = {"headers": "firstrow", "tablefmt": "rounded_grid", "floatfmt": ".3f"}
+    print(tabulate(fold_table, **tkwgs))
+
+    mtest = fold_metrics["Test"]
+    cv_metrics.append([mtest["accuracy"], mtest["auc"], mtest["c_indx"]])
+
+    return cv_metrics

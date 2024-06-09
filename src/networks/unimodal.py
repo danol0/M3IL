@@ -208,7 +208,9 @@ class GNN(BaseEncoder):
         if pool == "collate":
             self.aggregate = self.collate_graphs
         elif pool == "attn":
-            self.aggregate = GraphAttentionPool(fdim=fdim, hdim=fdim // 2, dropout=dropout)
+            self.aggregate = GraphAttentionPool(
+                fdim=fdim, hdim=fdim // 2, dropout=dropout
+            )
         elif pool == "mean":
             self.aggregate = MeanAggregation()
         elif pool is None:
