@@ -65,7 +65,7 @@ class BaseEncoder(nn.Module):
 
 # --- Pooling ---
 class BaseAttentionPool(nn.Module):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0.25) -> None:
+    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0) -> None:
         """
         Computes an normalised attention score over input features.
 
@@ -90,7 +90,7 @@ class BaseAttentionPool(nn.Module):
 
 
 class MaskedAttentionPool(BaseAttentionPool):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0.25) -> None:
+    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0) -> None:
         """
         Performs masked attention pooling over first dimension for 0 padded inputs.
         (batch, samples, features) -> (batch, pooled_features)
@@ -108,7 +108,7 @@ class MaskedAttentionPool(BaseAttentionPool):
 
 
 class GraphAttentionPool(BaseAttentionPool):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0.25) -> None:
+    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0) -> None:
         """
         Performs attention pooling of graph features via an index vector.
         (n_graphs, features) -> (batch_size, pooled_features)
@@ -208,7 +208,7 @@ class GNN(BaseEncoder):
         if pool == "collate":
             self.aggregate = self.collate_graphs
         elif pool == "attn":
-            self.aggregate = GraphAttentionPool(fdim=fdim, hdim=16, dropout=dropout)
+            self.aggregate = GraphAttentionPool(fdim=fdim, hdim=16, dropout=0)
         elif pool == "mean":
             self.aggregate = MeanAggregation()
         elif pool is None:
