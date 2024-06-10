@@ -1,6 +1,19 @@
 import argparse
 
 
+class CustomNamespace(argparse.Namespace):
+    """Custom namespace class for nice printing."""
+
+    def __str__(self):
+        message = ""
+        message += "----------------- Options ---------------\n"
+        for k, v in sorted(vars(self).items()):
+            comment = ""
+            message += "{:>25}: {:<30}{}\n".format(str(k), str(v), comment)
+        message += "----------------- End -------------------"
+        return message
+
+
 def parse_args():
     """Parse command line arguments."""
 
@@ -38,7 +51,7 @@ def parse_args():
     # parser.add_argument("--n_heads", type=int, default=4)
     # parser.add_argument("--n_queries", type=int, default=16)
     # parser.add_argument("--transformer_layers", type=int, default=1)
-    opt = parser.parse_args()
+    opt = parser.parse_args(namespace=CustomNamespace())
 
     # Defaults that dynamically align with paper (if not overridden)
     if "omic" in opt.model and opt.task == "surv":
@@ -53,12 +66,14 @@ def parse_args():
         parser.set_defaults(lr=0.0005, adam_b1=0.5)
     if opt.model in ("path", "graph"):
         parser.set_defaults(l1=0)
-    # NOTE: Dont like these settings but they are in the paper, only using for instance MIL
     if opt.model in ("pathomic", "graphomic", "pathgraphomic"):
         if opt.mil == "PFS":
             parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
         else:
-            parser.set_defaults(lr=0.0005, adam_b1=0.5, n_epochs=60)
+            parser.set_defaults(lr=0.0005, adam_b1=0.5)
+    if opt.mil == "global":
+        # More epochs for global MIL to account for reduced dataset size
+        parser.set_defaults(n_epochs=60)
 
     # Sanity checks
     if not opt.use_vggnet and not opt.pre_encoded_path:
@@ -68,25 +83,5 @@ def parse_args():
     if opt.collate == "min" and opt.mil == 'local':
         raise ValueError("Min collation not supported with local MIL")
 
-    opt = parser.parse_args()
-    str_opt = str_options(parser, opt)
-    print(str_opt)
-    return opt, str_opt
-
-
-# python train.py --model qbt --task grad --folds 1 --use_rna 0  --lr 0.0005
-
-
-def str_options(parser, opt):
-    """Convert options to string."""
-
-    message = ""
-    message += "----------------- Options ---------------\n"
-    for k, v in sorted(vars(opt).items()):
-        comment = ""
-        default = parser.get_default(k)
-        if v != default:
-            comment = "\t[default: %s]" % str(default)
-        message += "{:>25}: {:<30}{}\n".format(str(k), str(v), comment)
-    message += "----------------- End -------------------"
-    return message
+    opt = parser.parse_args(namespace=CustomNamespace())
+    return opt

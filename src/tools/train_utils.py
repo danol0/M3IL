@@ -147,42 +147,6 @@ def make_cv_results_table(metrics_list: list) -> str:
     return tabulate(df.T, headers="keys", tablefmt="rounded_grid", floatfmt=".3f")
 
 
-def log_epoch(
-    epoch: int,
-    model: nn.Module,
-    train_loader: DataLoader,
-    test_loader: DataLoader,
-    loss_fn: nn.Module,
-    opt: Namespace,
-    train_loss: float,
-    all_preds: Dict,
-) -> str:
-    """Log epoch performance to WandB and return a description string for tqdm."""
-
-    _, train_acc, train_auc, c_train = evaluate(
-        model, train_loader, loss_fn, opt, pd.DataFrame(all_preds)
-    )
-    test_loss, test_acc, test_auc, c_test = evaluate(model, test_loader, loss_fn, opt)
-    desc = f"Epoch {epoch} (train/test) | Loss: {train_loss:.2f}/{test_loss:.2f} | "
-    wandb.log({"train_loss": train_loss, "test_loss": test_loss})
-    if opt.task != "surv":
-        desc += f"Acc: {train_acc:.2f}/{test_acc:.2f} | "
-        desc += f"AUC: {train_auc:.2f}/{test_auc:.2f} | "
-        wandb.log(
-            {
-                "train_acc": train_acc,
-                "test_acc": test_acc,
-                "train_auc": train_auc,
-                "test_auc": test_auc,
-            }
-        )
-    if opt.task != "grad":
-        desc += f"C-Index: {c_train:.2f}/{c_test:.2f} | "
-        wandb.log({"c_train": c_train, "c_test": c_test})
-
-    return desc
-
-
 def init_accelerator(opt: Namespace) -> Accelerator:
     """Initialises an accelerator on the correct device."""
 
@@ -209,7 +173,7 @@ def configure_wandb(opt: Namespace, k: int) -> wandb.run:
 
 
 def assign_ckptdir_and_group(opt: Namespace) -> None:
-    """Assigns checkpoint directory and CV group for WandB."""
+    """Assigns checkpoint directory and CV group for WandB. Updates opt in place."""
 
     rna = "_rna" if (opt.rna and "omic" in opt.model) else ""
     attn = "_attn" if opt.attn_pool else ""
@@ -239,3 +203,47 @@ def log_fold(cv_metrics: list, fold_metrics: Dict, k: int) -> list:
     cv_metrics.append([mtest["accuracy"], mtest["auc"], mtest["c_indx"]])
 
     return cv_metrics
+
+
+def log_epoch(
+    opt: Namespace,
+    model: nn.Module,
+    epoch: int,
+    train_loader: DataLoader,
+    test_loader: DataLoader,
+    loss_fn: nn.Module,
+    train_loss: float,
+    all_preds: Dict,
+) -> str:
+    """Log epoch performance to WandB and return a description string for tqdm."""
+
+    # Use precomputed predictions/loss for train
+    mtrain = evaluate(model, train_loader, loss_fn, opt, pd.DataFrame(all_preds))
+    train_acc = mtrain["accuracy"]
+    train_auc = mtrain["auc"]
+    c_train = mtrain["c_indx"]
+
+    mtest = evaluate(model, test_loader, loss_fn, opt)
+    test_loss = mtest["loss"]
+    test_acc = mtest["accuracy"]
+    test_auc = mtest["auc"]
+    c_test = mtest["c_indx"]
+
+    desc = f"Epoch {epoch} (train/test) | Loss: {train_loss:.2f}/{test_loss:.2f} | "
+    wandb.log({"train_loss": train_loss, "test_loss": test_loss})
+    if opt.task != "surv":
+        desc += f"Acc: {train_acc:.2f}/{test_acc:.2f} | "
+        desc += f"AUC: {train_auc:.2f}/{test_auc:.2f} | "
+        wandb.log(
+            {
+                "train_acc": train_acc,
+                "test_acc": test_acc,
+                "train_auc": train_auc,
+                "test_auc": test_auc,
+            }
+        )
+    if opt.task != "grad":
+        desc += f"C-Index: {c_train:.2f}/{c_test:.2f} | "
+        wandb.log({"c_train": c_train, "c_test": c_test})
+
+    return desc

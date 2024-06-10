@@ -98,7 +98,7 @@ class psuedoSupervisedDataset(Dataset):
     def __init__(self, data: Dict, split: int, opt: Namespace) -> None:
         """
         Defines a multimodal pathology dataset of instance level combinations.
-        Returns a single instance from each modality on each call.
+        Returns a single instance from each modality on each call, paired with the bag label.
         On init, a list of instance combinations that index the data dictionary is created.
         This is based on the assumption that there are 9 path instances for each graph instance,
         and that the x_path and x_graph lists are ordered accordingly.

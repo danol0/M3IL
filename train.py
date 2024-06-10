@@ -19,7 +19,8 @@ from src.tools.options import parse_args
 def CV_Main() -> None:
     """Cross-validates a model specified by command line args."""
 
-    opt, str_opt = parse_args()
+    opt = parse_args()
+    print(opt)
     accelerator = utils.init_accelerator(opt)
     split_data = get_splits(opt)
     utils.assign_ckptdir_and_group(opt)
@@ -43,7 +44,7 @@ def CV_Main() -> None:
         model = utils.define_model(opt)
 
         if k == 1:
-            print(model, f"\n{model.n_params()} trainable parameters")
+            print(f"\n{model.n_params()} trainable parameters")
 
         with utils.configure_wandb(opt, k):
             metrics = train(model, split_data[k], accelerator, opt)
@@ -56,7 +57,7 @@ def CV_Main() -> None:
 
     if not opt.dry_run:
         with open(f"{opt.ckpt_dir}/results.txt", "w") as f:
-            f.write(str_opt + "\n")
+            f.write(str(opt) + "\n")
             f.write(rtable + "\n\n")
         print(f"Results saved to ./{opt.ckpt_dir}/")
 
@@ -66,7 +67,7 @@ def train(
     split_data: Dict,
     accelerator: Accelerator,
     opt: Namespace,
-    verbose: bool = False,
+    verbose: bool = True,
 ) -> Dict:
     """
     Train a model for a single split.
@@ -154,14 +155,7 @@ def train(
         if verbose:
             train_loss /= samples
             desc = utils.log_epoch(
-                epoch,
-                model,
-                train_loader,
-                test_loader,
-                loss_fn,
-                opt,
-                train_loss,
-                all_preds,
+                opt, model, epoch, train_loader, test_loader, loss_fn, train_loss, all_preds
             )
             pbar.set_description(desc)
 
