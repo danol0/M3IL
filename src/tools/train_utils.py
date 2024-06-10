@@ -21,8 +21,10 @@ from src.tools.evaluation import evaluate
 # --- General ---
 def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
     np.random.seed(seed)
+    torch.use_deterministic_algorithms(True)
+    # Required for determenistic behaviour on graph conv layers
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
 def mkdir(path: str) -> str:
