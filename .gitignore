@@ -1,4 +1,3 @@
-trainold.py
 data/*
 *.pyc
 *.ipynb
@@ -14,3 +13,5 @@ env.yml
 figs/*
 *.pkl
 config/*
+report/*
+z/*

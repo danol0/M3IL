@@ -1,0 +1,18 @@
+axes.labelsize : 13
+
+xtick.labelsize : 11
+ytick.labelsize : 11
+xtick.top : True
+ytick.right : True
+xtick.minor.visible : True
+ytick.minor.visible : True
+
+font.size : 12
+
+errorbar.capsize : 2
+
+legend.fontsize : 12
+
+figure.autolayout : True
+
+savefig.dpi : 300
