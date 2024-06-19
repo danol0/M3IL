@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 
-def get_splits(opt: Namespace) -> dict:
+def get_splits(opt: Namespace, split_csv='pnas_splits.csv') -> dict:
     """
     Constructs the data splits for the TCGA-GBMLGG dataset.
     Only includes data necessary for the specified model.
@@ -23,6 +23,10 @@ def get_splits(opt: Namespace) -> dict:
                 y: list of event, time, grade labels
             }
         }
+
+    Args:
+        opt (Namespace): Command line arguments
+        split_csv (pd.DataFrame): Name of csv file containing splits.
     """
 
     data_dir = opt.data_dir
@@ -34,10 +38,12 @@ def get_splits(opt: Namespace) -> dict:
     )
     split_data = {}
 
-    pnas_splits = pd.read_csv(f"{data_dir}/splits/pnas_splits.csv")
-    pnas_splits.columns = ["TCGA ID"] + [k for k in range(1, 16)]
-    pnas_splits.set_index("TCGA ID", inplace=True)
-    pnas_splits = pnas_splits.applymap(lambda x: x.lower())
+    splits = pd.read_csv(f"{data_dir}/splits/{split_csv}")
+    splits.columns = ["TCGA ID"] + [k for k in range(1, splits.shape[1])]
+    splits.set_index("TCGA ID", inplace=True)
+    splits = splits.applymap(lambda x: x.lower())
+    splits.to_csv(f"{data_dir}/splits/test.csv", index=True)
+    assert opt.folds <= splits.shape[1], "Number of folds exceeds number of splits in CSV"
 
     if opt.pre_encoded_path and "path" in opt.model:
         if opt.use_vggnet:
@@ -113,8 +119,8 @@ def get_splits(opt: Namespace) -> dict:
                         dataset.loc[pat]["Grade"],
                     ],
                 }
-                for pat in pnas_splits.index[
-                    (pnas_splits[k] == split) & (pnas_splits.index.isin(dataset.index))
+                for pat in splits.index[
+                    (splits[k] == split) & (splits.index.isin(dataset.index))
                 ]
             }
             for split in ["train", "test"]
@@ -143,6 +149,7 @@ def get_all_dataset(
     use_rnaseq: bool = False,
     rm_missing_omics: bool = True,
     rm_missing_grade: bool = True,
+    verbose: bool = True,
 ) -> tuple[list[str], pd.DataFrame]:
     """
     Loads the raw patient data/labels and aligns with omics.
@@ -153,6 +160,7 @@ def get_all_dataset(
         use_rnaseq (bool): Whether to include RNA data
         rm_missing_omics (bool): Whether to remove patients with missing omics
         rm_missing_grade (bool): Whether to remove patients with missing grade
+        verbose (bool): Print processing steps
     """
     labels = [
         "Grade",
@@ -219,24 +227,24 @@ def get_all_dataset(
         glioma_RNAseq.index.name = "TCGA ID"
         print(
             f"Removing {all_dataset.shape[0] - glioma_RNAseq.shape[0]} patients with missing RNAseq data"
-        )
+        ) if verbose else None
         all_dataset = all_dataset.join(glioma_RNAseq, how="inner")
 
     # Impute or remove missing data
     if rm_missing_grade:
         print(
             f"Removing {all_dataset['Grade'].isna().sum()} patients with missing grade"
-        )
+        ) if verbose else None
         all_dataset = all_dataset[all_dataset["Grade"].notna()]
     else:
         # Impute value is irrelevant as grade is a label not a feature
-        print(f"Imputing {all_dataset['Grade'].isna().sum()} missing grades with 1")
+        print(f"Imputing {all_dataset['Grade'].isna().sum()} missing grades with 1") if verbose else None
         all_dataset["Grade"] = all_dataset["Grade"].fillna(1)
 
     if rm_missing_omics:
         print(
             f"Removing {all_dataset.isna().any(axis=1).sum()} patients with missing omics"
-        )
+        ) if verbose else None
         # NOTE: This is handled differently to the paper. There are 3 patients with no omics data,
         # but as they have a moltype they are imputed for omic models (in grade classification tasks).
         # Median imputation for omics means all 1s. As such they are removed here.
@@ -244,10 +252,10 @@ def get_all_dataset(
     else:
         print(
             f"Imputing missing omics with median in {all_dataset.isna().any(axis=1).sum()} patients"
-        )
+        ) if verbose else None
         for col in all_dataset.drop(labels, axis=1).columns:
             all_dataset[col] = all_dataset[col].fillna(all_dataset[col].median())
 
-    print(f"Total patients: {all_dataset.shape[0]}")
+    print(f"Total patients: {all_dataset.shape[0]}") if verbose else None
 
     return labels, all_dataset
