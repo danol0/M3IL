@@ -71,8 +71,8 @@ def parse_args():
             parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
         else:
             parser.set_defaults(lr=0.0005, adam_b1=0.5)
-    if opt.mil == "global":
-        # More epochs for global MIL to account for reduced dataset size
+    if opt.mil in ("global", "local"):
+        # More epochs for MIL to account for reduced dataset size
         parser.set_defaults(n_epochs=60)
 
     # Sanity checks

@@ -41,15 +41,9 @@ class BaseEncoder(nn.Module):
         hazard = self.hazard_clf(x) * self.output_range + self.output_shift
 
         if self.local:
-            if mask is None:
-                mask = torch.any(x != 0, dim=-1)
-            mask = mask.unsqueeze(-1)
-            grade = torch.where(
-                mask, grade, torch.tensor(-float("Inf"), device=grade.device)
-            )
-            hazard = torch.where(mask, hazard, torch.tensor(0.0, device=hazard.device))
-            grade = torch.max(grade, dim=1)[0]
-            hazard = MaskedMeanPool()(hazard)
+            assert mask is not None, "Pre-computed aggregation mask required for local MIL."
+            grade = MaskedMeanPool()(grade, mask)
+            hazard = MaskedMeanPool()(hazard, mask)
 
         return x, grade, hazard
 
@@ -65,7 +59,7 @@ class BaseEncoder(nn.Module):
 
 # --- Pooling ---
 class BaseAttentionPool(nn.Module):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0) -> None:
+    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0, temperature: float = 1.0) -> None:
         """
         Computes an normalised attention score over input features.
 
@@ -73,6 +67,7 @@ class BaseAttentionPool(nn.Module):
             fdim (int): Input feature dimension.
             hdim (int): Hidden layer dimension.
             dropout (float): Dropout rate.
+            temperature (float): Scaling factor.
 
         Adapted from: https://github.com/mahmoodlab/CLAM/blob/master/models/model_clam.py
         """
@@ -80,22 +75,24 @@ class BaseAttentionPool(nn.Module):
         self.a = nn.Sequential(nn.Linear(fdim, hdim), nn.Sigmoid(), nn.Dropout(dropout))
         self.b = nn.Sequential(nn.Linear(fdim, hdim), nn.Tanh(), nn.Dropout(dropout))
         self.c = nn.Linear(hdim, 1)
+        self.temperature = temperature
 
     def attn(self, x: torch.Tensor) -> torch.Tensor:
         a = self.a(x)
         b = self.b(x)
         A = a.mul(b)
         A = self.c(A)
+        A /= self.temperature
         return A
 
 
 class MaskedAttentionPool(BaseAttentionPool):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0) -> None:
+    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0, temperature: float = 1.0) -> None:
         """
         Performs masked attention pooling over first dimension for 0 padded inputs.
         (batch, samples, features) -> (batch, pooled_features)
         """
-        super().__init__(fdim, hdim, dropout)
+        super().__init__(fdim, hdim, dropout, temperature)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         A = self.attn(x)
@@ -108,14 +105,14 @@ class MaskedAttentionPool(BaseAttentionPool):
 
 
 class GraphAttentionPool(BaseAttentionPool):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0) -> None:
+    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0, temperature: float = 1.0) -> None:
         """
         Performs attention pooling of graph features via an index vector.
         (n_graphs, features) -> (batch_size, pooled_features)
 
         Adapted from: https://pytorch-geometric.readthedocs.io/en/1.3.1/_modules/torch_geometric/nn/glob/attention.html
         """
-        super().__init__(fdim, hdim, dropout)
+        super().__init__(fdim, hdim, dropout, temperature)
 
     def forward(
         self, x: torch.Tensor, index: torch.Tensor, dim_size: int = None
@@ -130,9 +127,13 @@ class GraphAttentionPool(BaseAttentionPool):
 class MaskedMeanPool(nn.Module):
     """Masked mean pooling over dim 1 for 0 padded inputs."""
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mask = torch.any(x != 0, dim=-1)
-        assert torch.all(mask.any(dim=1)), "All-zero batch detected."
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        if mask is None:
+            mask = torch.any(x != 0, dim=-1)
+            assert torch.all(mask.any(dim=1)), "All-zero batch detected."
+        else:
+            assert x.dim() == mask.dim() + 1 and x.size()[:2] == mask.size()[:2]
+            x = x * mask.unsqueeze(-1)
         return x.sum(dim=1) / mask.sum(dim=1, keepdim=True)
 
 
@@ -239,6 +240,7 @@ class GNN(BaseEncoder):
         Args:
             x (torch.Tensor): Graph embeddings.
             index (torch.Tensor): Batch indices, ie which patient each graph belongs to.
+            dim_size (int): Size of the batch dimension (ie number of patients).
         """
         dim_size = index[-1].item() + 1 if dim_size is None else dim_size
         x = x.squeeze(1)
@@ -276,6 +278,9 @@ class GNN(BaseEncoder):
 
     def forward(self, **kwargs: torch.Tensor) -> tuple:
         x = self.get_latents(**kwargs)
+        if self.local:
+            mask = torch.any(x != 0, dim=-1)
+            return self.predict(x, mask)
         return self.predict(x)
 
 
@@ -283,7 +288,7 @@ class GNN(BaseEncoder):
 class ResNetClassifier(BaseEncoder):
     def __init__(self, xdim: int = 2048, pool: str = None) -> None:
         """
-        Classifier for pre-extracted resnet features.
+        Skeleton classifier for pre-extracted resnet features.
 
         Args:
             xdim (int): Input feature dimension.
