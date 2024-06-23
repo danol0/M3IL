@@ -131,7 +131,7 @@ def evaluate(
                 "hazard_pred",
             ]
         ]
-        loss = loss_fn(model, *loss_inputs).item()
+        loss = loss_fn(model, *loss_inputs)[1].item()
 
     metrics["loss"] = loss
 

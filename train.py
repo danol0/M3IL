@@ -8,6 +8,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import wandb
 
 import src.tools.train_utils as utils
 from src.dataset.loaders import define_collate_fn, define_dataset
@@ -20,10 +21,10 @@ def CV_Main() -> None:
     """Cross-validates a model specified by command line args."""
 
     opt = parse_args()
-    print(opt)
     accelerator = utils.init_accelerator(opt)
     split_data = get_splits(opt)
     utils.assign_ckptdir_and_group(opt)
+    print(opt)
 
     cv_metrics = []
     # --- Cross-validation Loop ---
@@ -47,6 +48,7 @@ def CV_Main() -> None:
             print(f"\n{model.n_params()} trainable parameters")
 
         with utils.configure_wandb(opt, k):
+            wandb.watch(model)
             metrics = train(model, split_data[k], accelerator, opt)
 
         cv_metrics = utils.log_fold(cv_metrics, metrics, k)
@@ -82,7 +84,7 @@ def train(
     # --- Initialisation ---
     train_loader, test_loader = (
         DataLoader(
-            define_dataset(opt)(split_data, split, opt),
+            define_dataset(opt)(split_data[split], opt),
             batch_size=opt.batch_size,
             shuffle=True,
             collate_fn=define_collate_fn(opt),
@@ -128,8 +130,11 @@ def train(
             # --- Training Step ---
             optim.zero_grad()
             _, grade_pred, hazard_pred = model(x_omic=omic, x_path=path, x_graph=graph)
-            loss = loss_fn(model, grade, time, event, grade_pred, hazard_pred)
-            accelerator.backward(loss)
+            # Objective includes reg term, loss does not and is used for logging
+            objective, loss = loss_fn(
+                model, grade, time, event, grade_pred, hazard_pred
+            )
+            accelerator.backward(objective)
             optim.step()
 
             # --- Logging ---
@@ -155,7 +160,14 @@ def train(
         if verbose:
             train_loss /= samples
             desc = utils.log_epoch(
-                opt, model, epoch, train_loader, test_loader, loss_fn, train_loss, all_preds
+                opt,
+                model,
+                epoch,
+                train_loader,
+                test_loader,
+                loss_fn,
+                train_loss,
+                all_preds,
             )
             pbar.set_description(desc)
 

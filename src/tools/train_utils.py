@@ -24,7 +24,7 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.use_deterministic_algorithms(True)
     # Required for determenistic behaviour on graph conv layers
-    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 
 def mkdir(path: str) -> str:
@@ -82,7 +82,8 @@ class PathomicLoss(nn.Module):
         nll = F.nll_loss(grade_pred, grade) if self.nll else _zero
         cox = self.cox_loss(time, event, hazard_pred) if self.cox else _zero
         l1 = model.l1() * self.l1 if self.l1 else _zero
-        return nll + cox + l1
+        loss = nll + cox
+        return loss + l1, loss
 
 
 # --- Training ---
@@ -167,7 +168,7 @@ def configure_wandb(opt: Namespace, k: int) -> wandb.run:
     return wandb.init(
         reinit=True,
         mode="disabled" if opt.dry_run else "online",
-        project="FormalMIL",
+        project="M3IL",
         config=opt,
         group=opt.group,
         name=f"{opt.group}_{k}",
