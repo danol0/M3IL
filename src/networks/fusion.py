@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 
 """
-This module reimplements the Kroneker fusion described in the paper. For reproducibility
-purposes, hyperparameters have been hardcoded to match the paper's implementation.
+This module reimplements the Kroneker fusion described in the paper. Hyperparameters have been hardcoded
+to match the paper's implementation as they have not been tuned for this project (see section 1.2 of report).
 Reference: https://github.com/mahmoodlab/PathomicFusion
 """
 

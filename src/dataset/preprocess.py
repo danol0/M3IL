@@ -7,10 +7,14 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
+"""
+This module contains functions for preprocessing the TCGA-GBMLGG dataset.
+"""
 
-def get_splits(opt: Namespace, split_csv='pnas_splits.csv') -> dict:
+
+def get_splits(opt: Namespace, split_csv="pnas_splits.csv") -> dict:
     """
-    Constructs the data splits for the TCGA-GBMLGG dataset.
+    Constructs the nested data dictionary for the TCGA-GBMLGG dataset.
     Only includes data necessary for the specified model.
     Standardises omics data.
 
@@ -43,7 +47,9 @@ def get_splits(opt: Namespace, split_csv='pnas_splits.csv') -> dict:
     splits.set_index("TCGA ID", inplace=True)
     splits = splits.applymap(lambda x: x.lower())
     splits.to_csv(f"{data_dir}/splits/test.csv", index=True)
-    assert opt.folds <= splits.shape[1], "Number of folds exceeds number of splits in CSV"
+    assert (
+        opt.folds <= splits.shape[1]
+    ), "Number of folds exceeds number of splits in CSV"
 
     if opt.pre_encoded_path and "path" in opt.model:
         if opt.use_vggnet:
@@ -77,6 +83,9 @@ def get_splits(opt: Namespace, split_csv='pnas_splits.csv') -> dict:
                     if img_fname.startswith(roi_fname.rstrip(".pt")):
                         roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
 
+    # This dictionary comprehension constructs the data by looping in the same
+    # granularity to the output: fold -> split -> patient -> data
+    # Returns empty lists if the model does not use the data type for efficiency
     for k in range(1, opt.folds + 1):
         split_data[k] = {
             split: {
@@ -175,9 +184,7 @@ def get_all_dataset(
     all_dataset.set_index("TCGA ID", inplace=True)
 
     all_grade = pd.read_csv(f"{data_dir}/omics/grade_data.csv")
-
     all_grade.set_index("TCGA ID", inplace=True)
-
     all_grade["Vital status"] = all_grade["Vital status"].map(
         {"Alive": 1, "Deceased": 0}
     )
@@ -191,7 +198,6 @@ def get_all_dataset(
         all_grade["Time to last followup or death (months)"]
     )
 
-    # assert pd.Series(all_dataset.index).equals(pd.Series(sorted(all_grade.index)))
     all_dataset = all_dataset.join(
         all_grade[["Histology", "Grade", "Molecular subtype"]],
         how="inner",
@@ -222,37 +228,42 @@ def get_all_dataset(
         glioma_RNAseq = glioma_RNAseq.dropna(axis=1)
         glioma_RNAseq.columns = [gene + "_rnaseq" for gene in glioma_RNAseq.columns]
         glioma_RNAseq.index = [patname[:12] for patname in glioma_RNAseq.index]
-        # keep first occurence of duplicated index
-        glioma_RNAseq = glioma_RNAseq.iloc[~glioma_RNAseq.index.duplicated()]
+        # Keep first occurence of duplicated patient
+        glioma_RNAseq = glioma_RNAseq.loc[~glioma_RNAseq.index.duplicated(keep="first")]
         glioma_RNAseq.index.name = "TCGA ID"
-        print(
-            f"Removing {all_dataset.shape[0] - glioma_RNAseq.shape[0]} patients with missing RNAseq data"
-        ) if verbose else None
+        if verbose:
+            print(
+                f"Removing {all_dataset.shape[0] - glioma_RNAseq.shape[0]} patients with missing RNAseq data"
+            )
         all_dataset = all_dataset.join(glioma_RNAseq, how="inner")
 
     # Impute or remove missing data
     if rm_missing_grade:
-        print(
-            f"Removing {all_dataset['Grade'].isna().sum()} patients with missing grade"
-        ) if verbose else None
+        if verbose:
+            print(
+                f"Removing {all_dataset['Grade'].isna().sum()} patients with missing grade"
+            )
         all_dataset = all_dataset[all_dataset["Grade"].notna()]
     else:
-        # Impute value is irrelevant as grade is a label not a feature
-        print(f"Imputing {all_dataset['Grade'].isna().sum()} missing grades with 1") if verbose else None
+        # Impute value is irrelevant as grade is a label not a feature (and we remove for grade classification tasks)
+        if verbose:
+            print(f"Imputing {all_dataset['Grade'].isna().sum()} missing grades with 1")
         all_dataset["Grade"] = all_dataset["Grade"].fillna(1)
 
     if rm_missing_omics:
-        print(
-            f"Removing {all_dataset.isna().any(axis=1).sum()} patients with missing omics"
-        ) if verbose else None
+        if verbose:
+            print(
+                f"Removing {all_dataset.isna().any(axis=1).sum()} patients with missing omics"
+            )
         # NOTE: This is handled differently to the paper. There are 3 patients with no omics data,
         # but as they have a moltype they are imputed for omic models (in grade classification tasks).
         # Median imputation for omics means all 1s. As such they are removed here.
         all_dataset = all_dataset[all_dataset.notna().all(axis=1)]
     else:
-        print(
-            f"Imputing missing omics with median in {all_dataset.isna().any(axis=1).sum()} patients"
-        ) if verbose else None
+        if verbose:
+            print(
+                f"Imputing missing omics with median in {all_dataset.isna().any(axis=1).sum()} patients"
+            )
         for col in all_dataset.drop(labels, axis=1).columns:
             all_dataset[col] = all_dataset[col].fillna(all_dataset[col].median())
 

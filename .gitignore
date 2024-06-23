@@ -18,3 +18,4 @@ z/*
 *.sh
 *.log
 machine*
+cache/*

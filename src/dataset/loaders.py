@@ -12,9 +12,9 @@ from torchvision import transforms
 
 def define_dataset(opt) -> Dataset:
     if opt.mil == "PFS":
-        return psuedoSupervisedDataset
+        return psuedoSupervised_TCGADataset
     elif opt.mil in ("global", "local"):
-        return MMMILDataset
+        return MMMIL_TCGADataset
     else:
         raise NotImplementedError(f"MIL type {opt.mil} not implemented.")
 
@@ -35,29 +35,41 @@ def get_transforms() -> transforms.Compose:
     return tr
 
 
-# --- Dataset Class ---
 class MMMILDataset(Dataset):
-    def __init__(self, data: Dict, split: int, opt: Namespace) -> None:
+    def __init__(self, data: Dict) -> None:
         """
-        Defines a multimodal pathology dataset bagged at the patient level.
+        Generic multimodal multiple instance learning dataset.
+        Expects a nested data dictionary of the form:
+        bag_i: {mode_1: tensor, mode_2: tensor, ..., mode_n: tensor, y: bag_label}
+        """
+        self.data = data
+        self.bagnames = list(self.data.keys())
+
+    def __getitem__(self, idx: int) -> tuple:
+        bag = self.bagnames[idx]
+        return tuple(self.data[bag].values())
+
+
+# --- Dataset Class ---
+class MMMIL_TCGADataset(Dataset):
+    def __init__(self, data: Dict, opt: Namespace) -> None:
+        """
+        MIL dataset for path, graph and omic TCGA data bagged at patient level.
         Returns all data for a given patient on each call.
         Expects a nested data dictionary of the form:
-        split {
-            patient_id {
-                x_omic: omic data tensor
-                x_path: pre-extracted histology feature tensor or list of image paths
-                x_graph: list of graph data paths
-                y: list of event, time, grade labels
-            }
+        patient_id {
+            x_omic: omic data tensor
+            x_path: pre-extracted histology feature tensor or list of image paths
+            x_graph: list of graph data paths
+            y: list of event, time, grade labels
         }
 
         Args:
             data (Dict): Patient data dictionary
-            split (int): Split index
             opt (Namespace): Command line arguments
         """
         self.model = opt.model
-        self.data = data[split]
+        self.data = data
         self.patnames = list(self.data.keys())
         self.pre_encoded_path = opt.pre_encoded_path
         self.transform = get_transforms()
@@ -94,8 +106,8 @@ class MMMILDataset(Dataset):
         return len(self.patnames)
 
 
-class psuedoSupervisedDataset(Dataset):
-    def __init__(self, data: Dict, split: int, opt: Namespace) -> None:
+class psuedoSupervised_TCGADataset(Dataset):
+    def __init__(self, data: Dict, opt: Namespace) -> None:
         """
         Defines a multimodal pathology dataset of instance level combinations.
         Returns a single instance from each modality on each call, paired with the bag label.
@@ -105,7 +117,7 @@ class psuedoSupervisedDataset(Dataset):
         Patches are only paired with their parent graph as done in the paper.
         """
         self.model = opt.model
-        self.data = data[split]
+        self.data = data
         self.pre_encoded_path = opt.pre_encoded_path
         self.transform = get_transforms()
 
@@ -161,7 +173,7 @@ def define_collate_fn(opt: Namespace) -> callable:
         if opt.collate == "min":
             return lambda batch: select_min(batch, opt.device)
         elif opt.collate == "pad":
-            return lambda batch: pad2max(batch, opt.device)
+            return lambda batch: zero_pad(batch, opt.device)
         else:
             raise NotImplementedError(f"Collate function {opt.collate} not implemented")
 
@@ -195,7 +207,7 @@ def prepare_graph_batch(graph: Batch, device: torch.device) -> tuple:
 
 
 # --- Handling variable image input sequence lengths ---
-def pad2max(batch: list, device: torch.device) -> tuple:
+def zero_pad(batch: list, device: torch.device) -> tuple:
     """Pads image sequences to the maximum length in the batch."""
 
     omic, path, graph, event, time, grade, pname = zip(*batch)
