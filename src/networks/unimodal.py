@@ -28,6 +28,7 @@ class BaseEncoder(nn.Module):
 
         Args:
             fdim (int): Processed feature dimension.
+            local (bool): If using local MIL, ie aggregating labels.
         """
         super().__init__()
         self.grade_clf = nn.Sequential(nn.Linear(fdim, 3), nn.LogSoftmax(dim=-1))
@@ -41,7 +42,7 @@ class BaseEncoder(nn.Module):
         hazard = self.hazard_clf(x) * self.output_range + self.output_shift
 
         if self.local:
-            assert mask is not None, "Pre-computed aggregation mask required for local MIL."
+            assert mask is not None, "Mask required for local MIL."
             grade = MaskedMeanPool()(grade, mask)
             hazard = MaskedMeanPool()(hazard, mask)
 
@@ -50,18 +51,28 @@ class BaseEncoder(nn.Module):
     def freeze(self, freeze: bool) -> None:
         dfs_freeze(self, freeze)
 
-    def l1(self) -> torch.Tensor:
-        return sum(torch.abs(W).sum() for W in self.parameters())
-
     def n_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def n_layers(self) -> int:
+        return sum(1 for _ in self.children())
+
+    def l1(self) -> torch.Tensor:
+        # Placeholder for L1 regularization, overwritten in models where it is enabled
+        return torch.tensor(0.0, device=self.output_range.device)
 
 
 # --- Pooling ---
 class BaseAttentionPool(nn.Module):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0, temperature: float = 1.0) -> None:
+    def __init__(
+        self,
+        fdim: int = 32,
+        hdim: int = 16,
+        dropout: float = 0,
+        temperature: float = 1.0,
+    ) -> None:
         """
-        Computes an normalised attention score over input features.
+        Computes a gated attention score over input features.
 
         Args:
             fdim (int): Input feature dimension.
@@ -81,13 +92,18 @@ class BaseAttentionPool(nn.Module):
         a = self.a(x)
         b = self.b(x)
         A = a.mul(b)
-        A = self.c(A)
-        A /= self.temperature
+        A = self.c(A) / self.temperature
         return A
 
 
 class MaskedAttentionPool(BaseAttentionPool):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0, temperature: float = 1.0) -> None:
+    def __init__(
+        self,
+        fdim: int = 32,
+        hdim: int = 16,
+        dropout: float = 0,
+        temperature: float = 1.0,
+    ) -> None:
         """
         Performs masked attention pooling over first dimension for 0 padded inputs.
         (batch, samples, features) -> (batch, pooled_features)
@@ -96,16 +112,21 @@ class MaskedAttentionPool(BaseAttentionPool):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         A = self.attn(x)
-        # Masking
-        pad = torch.all(x == 0, dim=-1)
-        A[pad] = -float("Inf")
+        mask = torch.all(x == 0, dim=-1)
+        A[mask] = -float("Inf")
         A = F.softmax(A, dim=1)
         assert A.dim() == x.dim() and A.size(0) == x.size(0)
         return torch.sum(A * x, dim=1)
 
 
 class GraphAttentionPool(BaseAttentionPool):
-    def __init__(self, fdim: int = 32, hdim: int = 16, dropout: float = 0, temperature: float = 1.0) -> None:
+    def __init__(
+        self,
+        fdim: int = 32,
+        hdim: int = 16,
+        dropout: float = 0,
+        temperature: float = 1.0,
+    ) -> None:
         """
         Performs attention pooling of graph features via an index vector.
         (n_graphs, features) -> (batch_size, pooled_features)
@@ -125,7 +146,7 @@ class GraphAttentionPool(BaseAttentionPool):
 
 
 class MaskedMeanPool(nn.Module):
-    """Masked mean pooling over dim 1 for 0 padded inputs."""
+    """Mean pooling over dim 1 for 0 padded inputs."""
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         if mask is None:
@@ -167,6 +188,9 @@ class FFN(BaseEncoder):
     def forward(self, **kwargs: torch.Tensor) -> tuple:
         x = self.get_latents(**kwargs)
         return self.predict(x)
+
+    def l1(self) -> torch.Tensor:
+        return sum(torch.abs(W).sum() for W in self.parameters())
 
 
 # --- Graph ---
@@ -230,8 +254,9 @@ class GNN(BaseEncoder):
         data.edge_attr = data.edge_attr / data.edge_attr.max(0, keepdim=True)[0]
         return data
 
+    @staticmethod
     def collate_graphs(
-        self, x: torch.Tensor, index: torch.Tensor, dim_size: int = None
+        x: torch.Tensor, index: torch.Tensor, dim_size: int = None
     ) -> torch.Tensor:
         """
         Converts graph embeddings of shape (n_graphs, fdim) to tensor of

@@ -37,8 +37,7 @@ class FlexibleFusion(BaseEncoder):
             fdim (int): Dimension of feature vector for each modality.
             mmfdim (int): Dimension of fused multimodal feature vector.
         """
-        self.local = opt.mil == "local"
-        super().__init__(mmfdim, local=self.local)
+        super().__init__(mmfdim, local=opt.mil == "local")
         self.device = opt.device
 
         # --- Feature encoders ---
@@ -53,14 +52,17 @@ class FlexibleFusion(BaseEncoder):
             self.omic_net.freeze(True)
 
         if "graph" in opt.model:
+            # Pooling is handled within the GNN model
             self.graph_net = GNN(fdim=fdim, pool=opt.graph_pool, dropout=opt.dropout)
             self.graph_net.load_state_dict(graph_ckpt["model"])
             self.graph_net = self.graph_net.to(opt.device)
             self.graph_net.freeze(True)
 
         if "path" in opt.model:
-            # Unlike graphs, path images are not aggregated in their encoder
-            # or when loaded directly as pre-encoded features
+            assert (
+                opt.pre_encoded_path
+            ), "Pre-extracted path features must be used for MM models."
+            # Unlike graphs, path images are not aggregated in their encoder/as pre-extracted features
             self.aggregate = nn.Identity()
             if opt.mil == "global":
                 self.aggregate = (
@@ -68,16 +70,6 @@ class FlexibleFusion(BaseEncoder):
                     if opt.attn_pool
                     else MaskedMeanPool()
                 )
-            if not opt.pre_encoded_path:
-                self.path_net = build_vgg19_encoder(opt)
-                path_ckpt = print_load(
-                    f"checkpoints/{opt.task}/path_PFS/path_{opt.k}.pt",
-                    device=opt.device,
-                )
-                self.path_net.load_state_dict(path_ckpt["model"])
-                self.path_net = self.path_net.to(opt.device)
-                self.aggregate = nn.Identity()
-                self.path_net.freeze(True)  # Remains frozen
 
         # --- Fusion ---
         if "qbt" in opt.model:
@@ -105,11 +97,10 @@ class FlexibleFusion(BaseEncoder):
 
         p, g, o = self.align_MM_local_MIL(p, g, o) if self.local else (p, g, o)
         x = self.fusion(f_omic=o, f_graph=g, f_path=p)
-        mask = self.get_mask(p, g)
-        return self.predict(x, mask=mask)
+        return self.predict(x, mask=self.get_mask(p, g))
 
     def get_mask(self, p: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
-        """Generates mask for 0 padded multimodal inputs."""
+        """Generates mask for 0 padded multimodal inputs, which is only used in local MIL."""
 
         mask = None
         if self.local:
@@ -126,25 +117,20 @@ class FlexibleFusion(BaseEncoder):
         """Aligns samples across modalities as done in original architecture for local MIL,
         such that they are all shape (batch, samples, features) with corresponding instances
         in each index."""
-
-        if self.local:
-            max_sample = max(
-                p.size(1) if p is not None else 0, g.size(1) if g is not None else 0
-            )
-            if o is not None:
-                o = o.unsqueeze(1)
-                o = o.repeat(1, max_sample, 1)
-            if g is not None and g.size(1) != max_sample:
-                assert g.size(1) * 9 == p.size(1)
-                g = g.repeat_interleave(9, dim=1, output_size=max_sample)
+        max_sample = max(
+            p.size(1) if p is not None else 0, g.size(1) if g is not None else 0
+        )
+        if o is not None:
+            o = o.unsqueeze(1)
+            o = o.repeat(1, max_sample, 1)
+        if g is not None and g.size(1) != max_sample:
+            assert g.size(1) * 9 == p.size(1)
+            g = g.repeat_interleave(9, dim=1, output_size=max_sample)
         return p, g, o
 
     def l1(self) -> torch.Tensor:
-        # We only regularise the omic_net in MM models
-        if hasattr(self, "omic_net"):
-            return sum(torch.abs(W).sum() for W in self.omic_net.parameters())
-        else:
-            return torch.tensor(0.0).to(self.device)
+        # We only regularise the omic network in MM models
+        return sum(torch.abs(W).sum() for W in self.omic_net.parameters())
 
     @staticmethod
     def get_unimodal_ckpts(opt: Namespace) -> tuple:
@@ -170,105 +156,14 @@ class FlexibleFusion(BaseEncoder):
         return omic_ckpt, graph_ckpt
 
 
-class QBT(nn.Module):
-    def __init__(
-        self,
-        opt: Namespace,
-        fdim: int = 32,
-        n_queries: int = 32,
-        n_heads: int = 1,
-        transformer_layers: int = 12,
-    ) -> None:
-        """
-        Query-based transformer architecture for global multimodal fusion.
-        Learned queries interact with each modality via cross attention.
-
-        Args:
-            opt (Namespace): Command line arguments, specifying model and task
-            fdim (int): Dimension of input feature vector for each modality.
-            n_queries (int): Number of learnable queries.
-            n_heads (int): Number of attention heads.
-            transformer_layers (int): Number of transformer layers.
-        """
-        super().__init__()
-        # n_queries = opt.n_queries
-        # n_heads = opt.n_heads
-        # transformer_layers = opt.transformer_layers
-        print(f"QBT: {n_queries} queries, {n_heads} heads, {transformer_layers} layers")
-        self.n = transformer_layers
-
-        if "graph" in opt.model:
-            self.graph_cross_attn = nn.MultiheadAttention(
-                fdim, n_heads, dropout=opt.dropout, batch_first=True
-            )
-
-        if "path" in opt.model:
-            self.LN = nn.LayerNorm(fdim)
-            self.correlation = nn.MultiheadAttention(
-                fdim, n_heads, dropout=opt.dropout, batch_first=True
-            )
-            self.path_cross_attn = nn.MultiheadAttention(
-                fdim, n_heads, dropout=opt.dropout, batch_first=True
-            )
-
-        if "omic" in opt.model:
-            self.omics_cross_attn = nn.MultiheadAttention(
-                fdim, n_heads, dropout=opt.dropout, batch_first=True
-            )
-
-        self.FF = nn.Sequential(
-            nn.Linear(fdim, fdim),
-            nn.SELU(),
-            nn.Linear(fdim, fdim),
-            nn.AlphaDropout(opt.dropout),
-        )
-
-        self.query_self_attn = nn.MultiheadAttention(
-            fdim, n_heads, dropout=opt.dropout, batch_first=True
-        )
-
-        self.aggregate = MaskedAttentionPool(fdim=fdim, hdim=fdim // 2, dropout=opt.dropout)
-
-        self.Qs = Parameter(torch.randn(n_queries, fdim), requires_grad=True)
-
-    def forward(self, **kwargs: dict) -> torch.Tensor:
-        o, g, p = (
-            kwargs.get("f_omic", None),
-            kwargs.get("f_graph", None),
-            kwargs.get("f_path", None),
-        )
-        o = o.unsqueeze(1) if o is not None else None
-        p = p.unsqueeze(1) if p is not None else None
-
-        batch_size = (
-            o.size(0) if o is not None else g.size(0) if g is not None else p.size(0)
-        )
-
-        Q = self.Qs.repeat(batch_size, 1, 1)  # batch x 1 x fdim
-
-        if p is not None:
-            p = self.LN(p)
-            p = p + self.correlation(p, p, p)[0]
-
-        for i in range(self.n):
-            Q = self.omics_cross_attn(Q, o, o)[0] if o is not None else Q
-            Q = self.path_cross_attn(Q, p, p)[0] if p is not None else Q
-            Q = self.graph_cross_attn(Q, g, g)[0] if g is not None else Q
-            Q = self.FF(Q)
-
-        Q = self.query_self_attn(Q, Q, Q)[0]
-
-        return self.aggregate(Q)
-
-
 # class QBT(nn.Module):
 #     def __init__(
 #         self,
 #         opt: Namespace,
 #         fdim: int = 32,
-#         n_queries: int = 16,
-#         n_heads: int = 4,
-#         transformer_layers: int = 2,
+#         n_queries: int = 32,
+#         n_heads: int = 1,
+#         transformer_layers: int = 12,
 #     ) -> None:
 #         """
 #         Query-based transformer architecture for global multimodal fusion.
@@ -282,50 +177,45 @@ class QBT(nn.Module):
 #             transformer_layers (int): Number of transformer layers.
 #         """
 #         super().__init__()
+#         # n_queries = opt.n_queries
+#         # n_heads = opt.n_heads
+#         # transformer_layers = opt.transformer_layers
+#         print(f"QBT: {n_queries} queries, {n_heads} heads, {transformer_layers} layers")
 #         self.n = transformer_layers
 
 #         if "graph" in opt.model:
-#             self.graph_cross_attn = [
-#                 nn.MultiheadAttention(
-#                     fdim, n_heads, dropout=opt.dropout, batch_first=True
-#                 )
-#                 for _ in range(self.n)
-#             ]
+#             self.graph_cross_attn = nn.MultiheadAttention(
+#                 fdim, n_heads, dropout=opt.dropout, batch_first=True
+#             )
 
 #         if "path" in opt.model:
 #             self.LN = nn.LayerNorm(fdim)
 #             self.correlation = nn.MultiheadAttention(
 #                 fdim, n_heads, dropout=opt.dropout, batch_first=True
 #             )
-#             self.path_cross_attn = [
-#                 nn.MultiheadAttention(
-#                     fdim, n_heads, dropout=opt.dropout, batch_first=True
-#                 )
-#                 for _ in range(self.n)
-#             ]
+#             self.path_cross_attn = nn.MultiheadAttention(
+#                 fdim, n_heads, dropout=opt.dropout, batch_first=True
+#             )
 
 #         if "omic" in opt.model:
-#             self.omics_cross_attn = [
-#                 nn.MultiheadAttention(
-#                     fdim, n_heads, dropout=opt.dropout, batch_first=True
-#                 )
-#                 for _ in range(self.n)
-#             ]
+#             self.omics_cross_attn = nn.MultiheadAttention(
+#                 fdim, n_heads, dropout=opt.dropout, batch_first=True
+#             )
+
+#         self.FF = nn.Sequential(
+#             nn.Linear(fdim, fdim),
+#             nn.SELU(),
+#             nn.Linear(fdim, fdim),
+#             nn.AlphaDropout(opt.dropout),
+#         )
 
 #         self.query_self_attn = nn.MultiheadAttention(
 #             fdim, n_heads, dropout=opt.dropout, batch_first=True
 #         )
 
-#         self.MLP = [
-#             nn.Sequential(
-#                 nn.Linear(fdim, fdim),
-#                 nn.Dropout(opt.dropout),
-#                 nn.ReLU(),
-#                 nn.Linear(fdim, fdim),
-#                 nn.ReLU(),
-#             )
-#             for _ in range(self.n)
-#         ]
+#         self.aggregate = MaskedAttentionPool(
+#             fdim=fdim, hdim=fdim // 2, dropout=opt.dropout
+#         )
 
 #         self.Qs = Parameter(torch.randn(n_queries, fdim), requires_grad=True)
 
@@ -349,11 +239,122 @@ class QBT(nn.Module):
 #             p = p + self.correlation(p, p, p)[0]
 
 #         for i in range(self.n):
-#             Q = self.omics_cross_attn[i](Q, o, o)[0] if o is not None else Q
-#             Q = self.path_cross_attn[i](Q, p, p)[0] if p is not None else Q
-#             Q = self.graph_cross_attn[i](Q, g, g)[0] if g is not None else Q
-#             Q = self.MLP[i](Q)
+#             Q = self.omics_cross_attn(Q, o, o)[0] if o is not None else Q
+#             Q = self.path_cross_attn(Q, p, p)[0] if p is not None else Q
+#             Q = self.graph_cross_attn(Q, g, g)[0] if g is not None else Q
+#             Q = self.FF(Q)
 
 #         Q = self.query_self_attn(Q, Q, Q)[0]
 
-#         return Q.mean(dim=1)
+#         return self.aggregate(Q)
+
+
+class QBT(nn.Module):
+    def __init__(
+        self,
+        opt: Namespace,
+        fdim: int = 32,
+        n_queries: int = 16,
+        n_heads: int = 4,
+        transformer_layers: int = 32,
+    ) -> None:
+        """
+        Query-based transformer architecture for global multimodal fusion.
+        Learned queries interact with each modality via cross attention.
+
+        Args:
+            opt (Namespace): Command line arguments, specifying model and task
+            fdim (int): Dimension of input feature vector for each modality.
+            n_queries (int): Number of learnable queries.
+            n_heads (int): Number of attention heads.
+            transformer_layers (int): Number of transformer layers.
+        """
+        super().__init__()
+        self.n = transformer_layers
+
+        if "graph" in opt.model:
+            self.graph_cross_attn = [
+                nn.MultiheadAttention(
+                    fdim, n_heads, dropout=opt.dropout, batch_first=True
+                )
+                for _ in range(self.n)
+            ]
+
+        if "path" in opt.model:
+            self.LN = nn.LayerNorm(fdim)
+            self.correlation = nn.MultiheadAttention(
+                fdim, n_heads, dropout=opt.dropout, batch_first=True
+            )
+            self.path_cross_attn = [
+                nn.MultiheadAttention(
+                    fdim, n_heads, dropout=opt.dropout, batch_first=True
+                )
+                for _ in range(self.n)
+            ]
+
+        if "omic" in opt.model:
+            self.omics_cross_attn = [
+                nn.MultiheadAttention(
+                    fdim, n_heads, dropout=opt.dropout, batch_first=True
+                )
+                for _ in range(self.n)
+            ]
+
+        self.query_self_attn = nn.MultiheadAttention(
+            fdim, n_heads, dropout=opt.dropout, batch_first=True
+        )
+
+        self.MLP = [
+            nn.Sequential(
+                nn.Linear(fdim, fdim),
+                nn.Dropout(opt.dropout),
+                nn.ReLU(),
+                nn.Linear(fdim, fdim),
+                nn.ReLU(),
+            )
+            for _ in range(self.n)
+        ]
+
+        self.fenc = nn.Linear(self.n * n_queries * fdim, fdim)
+
+        self.Qs = Parameter(torch.randn(self.n, n_queries, fdim), requires_grad=True)
+
+    def forward(self, **kwargs: dict) -> torch.Tensor:
+        o, g, p = (
+            kwargs.get("f_omic", None),
+            kwargs.get("f_graph", None),
+            kwargs.get("f_path", None),
+        )
+        o = o.unsqueeze(1) if o is not None else None
+        p = p.unsqueeze(1) if p is not None else None
+
+        batch_size = (
+            o.size(0) if o is not None else g.size(0) if g is not None else p.size(0)
+        )
+
+        if p is not None:
+            p = self.LN(p)
+            p = p + self.correlation(p, p, p)[0]
+
+        Q = self.Qs.repeat(batch_size, 1, 1, 1)
+        Q = torch.einsum("bqnf->qbnf", Q)
+
+        for i in range(self.n):
+            Q[i] = self.omics_cross_attn[i](Q[i], o, o)[0] if o is not None else Q[i]
+            Q[i] = self.path_cross_attn[i](Q[i], p, p)[0] if p is not None else Q[i]
+            Q[i] = self.graph_cross_attn[i](Q[i], g, g)[0] if g is not None else Q[i]
+            Q[i] = self.MLP[i](Q[i])
+            # Q = self.omics_cross_attn[i](Q, o, o)[0] if o is not None else Q
+            # Q = self.path_cross_attn[i](Q, p, p)[0] if p is not None else Q
+            # Q = self.graph_cross_attn[i](Q, g, g)[0] if g is not None else Q
+            # Q = self.MLP[i](Q)
+
+        # Q = self.query_self_attn(Q, Q, Q)[0]
+        Q[i] = self.query_self_attn(Q[i], Q[i], Q[i])[0]
+
+        # batch permute
+        Q = torch.einsum("qbnf->bqnf", Q).reshape(batch_size, -1)
+
+        Q = self.fenc(Q)
+
+        return Q
