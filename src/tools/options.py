@@ -29,7 +29,7 @@ def parse_args():
     # Experiment args
     parser.add_argument("--model", type=str, default="omic")
     parser.add_argument("--task", type=str, default="grad", choices=["multi", "surv", "grad"])
-    parser.add_argument("--mil", type=str, default='PFS', choices=['PFS', 'global', 'local'])
+    parser.add_argument("--mil", type=str, default="PFS", choices=["PFS", "global", "local"])
     parser.add_argument("--rna", type=int, default=1, help="Use RNA data")
     parser.add_argument("--attn_pool", type=int, default=0, choices=[0, 1], help="Use attention pooling")
     parser.add_argument("--collate", type=str, default="pad", choices=["pad", "min"], help="Collation method for path data")
@@ -53,11 +53,11 @@ def parse_args():
     # parser.add_argument("--transformer_layers", type=int, default=1)
     opt = parser.parse_args(namespace=CustomNamespace())
 
-    # Defaults that dynamically align with paper (if not overridden)
+    # Dynamic defaults
     if "omic" in opt.model and opt.task == "surv":
         parser.set_defaults(rna=1)
     if opt.model == "path":
-        parser.set_defaults(batch_size=8, lr=0.0005, l1=0)
+        parser.set_defaults(batch_size=8, lr=0.0005, l1=0, pre_encoded_path=0)
     if opt.model == "omic":
         parser.set_defaults(batch_size=64, l2=5e-4)
     if opt.task == "grad" or opt.model in ("path", "graph"):
@@ -78,10 +78,16 @@ def parse_args():
     # Sanity checks
     if not opt.use_vggnet and not opt.pre_encoded_path:
         raise ValueError("Must use pre-encoded path features with ResNet")
-    if opt.attn_pool and opt.mil == 'PFS':
+    if opt.attn_pool and opt.mil == "PFS":
         raise ValueError("Attention pooling requires MIL")
-    if opt.collate == "min" and opt.mil == 'local':
+    if opt.collate == "min" and opt.mil == "local":
         raise ValueError("Min collation not supported with local MIL")
+    if opt.model in ("path", "omic") and opt.mil != "PFS":
+        # Path is treated as a feature extractor and only supports PFS
+        # There is only one omic datapoint per patient so no need for MIL
+        raise ValueError("MIL not supported for unimodal path/omic models")
+    if opt.l1 and opt.model in ("path", "graph"):
+        raise ValueError("L1 is only enabled for the omic network (or subnetwork in MM models)")
 
     opt = parser.parse_args(namespace=CustomNamespace())
     return opt
