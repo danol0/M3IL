@@ -8,11 +8,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim.lr_scheduler as lr_scheduler
-import wandb
 from accelerate import Accelerator
 from tabulate import tabulate
 from torch.utils.data import DataLoader
 
+import wandb
 from src.networks.multimodal import FlexibleFusion
 from src.networks.unimodal import FFN, GNN, ResNetClassifier, build_vgg19_encoder
 from src.tools.evaluation import evaluate
@@ -24,6 +24,7 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.use_deterministic_algorithms(True)
     # Required for determenistic behaviour on graph conv layers
+    # Note that this has a significant performance impact on CUDA
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 
@@ -161,7 +162,7 @@ def init_accelerator(opt: Namespace) -> Accelerator:
     return accelerator
 
 
-def configure_wandb(opt: Namespace, k: int) -> wandb.run:
+def configure_wandb(opt: Namespace, k: int) -> "wandb.Run":
     """Initialise a WandB run that tracks a single fold as part of a CV group."""
 
     os.environ["WANDB_SILENT"] = "true"
@@ -182,10 +183,10 @@ def assign_ckptdir_and_group(opt: Namespace) -> None:
     attn = "_attn" if opt.attn_pool else ""
     # Ignore MIL for omic as there is only 1 instance per patient
     if opt.model == "omic":
-        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}"
+        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}"
         opt.group = f"{opt.task}_{opt.model}{rna}"
     else:
-        opt.ckpt_dir = f"checkpoints/{opt.task}/{opt.model}{rna}_{opt.mil}{attn}"
+        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}_{opt.mil}{attn}"
         opt.group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{attn}"
     print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
 

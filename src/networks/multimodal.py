@@ -4,14 +4,14 @@ import torch
 from torch import nn
 from torch.nn import Parameter
 
-from src.networks.fusion import define_tensor_fusion
+from src.networks.tensor_fusion import define_tensor_fusion
 from src.networks.unimodal import (
     FFN,
     GNN,
     BaseEncoder,
     MaskedAttentionPool,
     MaskedMeanPool,
-    build_vgg19_encoder,
+    GraphAttentionPool,
 )
 
 
@@ -55,6 +55,11 @@ class FlexibleFusion(BaseEncoder):
             # Pooling is handled within the GNN model
             self.graph_net = GNN(fdim=fdim, pool=opt.graph_pool, dropout=opt.dropout)
             self.graph_net.load_state_dict(graph_ckpt["model"])
+            if opt.graph_pool == "attn":
+                # Reset attention weights
+                self.graph_net.aggregate = GraphAttentionPool(
+                    fdim=fdim, hdim=fdim, dropout=0
+                )
             self.graph_net = self.graph_net.to(opt.device)
             self.graph_net.freeze(True)
 

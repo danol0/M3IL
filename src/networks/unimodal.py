@@ -54,9 +54,6 @@ class BaseEncoder(nn.Module):
     def n_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    def n_layers(self) -> int:
-        return sum(1 for _ in self.children())
-
     def l1(self) -> torch.Tensor:
         # Placeholder for L1 regularization, overwritten in models where it is enabled
         return torch.tensor(0.0, device=self.output_range.device)
@@ -233,9 +230,7 @@ class GNN(BaseEncoder):
         if pool == "collate":
             self.aggregate = self.collate_graphs
         elif pool == "attn":
-            self.aggregate = GraphAttentionPool(
-                fdim=fdim, hdim=fdim // 2, dropout=dropout
-            )
+            self.aggregate = GraphAttentionPool(fdim=fdim, hdim=fdim, dropout=0.0)
         elif pool == "mean":
             self.aggregate = MeanAggregation()
         elif pool is None:
