@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="omic")
     parser.add_argument("--task", type=str, default="grad", choices=["multi", "surv", "grad"])
     parser.add_argument("--mil", type=str, default="PFS", choices=["PFS", "global", "local"])
-    parser.add_argument("--rna", type=int, default=1, help="Use RNA data")
+    parser.add_argument("--rna", type=int, default=0, help="Use RNA data")
     parser.add_argument("--attn_pool", type=int, default=0, choices=[0, 1], help="Use attention pooling")
     parser.add_argument("--collate", type=str, default="pad", choices=["pad", "min"], help="Collation method for path data")
     parser.add_argument("--pre_encoded_path", type=int, default=1, help="Use pre-extracted VGG features")
@@ -47,10 +47,6 @@ def parse_args():
     parser.add_argument("--adam_b1", type=float, default=0.9, help="Adam momentum")
     parser.add_argument("--unfreeze_unimodal", type=int, default=5, help="Epoch to unfreeze")
 
-    # QBT args
-    # parser.add_argument("--n_heads", type=int, default=4)
-    # parser.add_argument("--n_queries", type=int, default=16)
-    # parser.add_argument("--transformer_layers", type=int, default=1)
     opt = parser.parse_args(namespace=CustomNamespace())
 
     # Dynamic defaults
@@ -60,8 +56,6 @@ def parse_args():
         parser.set_defaults(batch_size=8, lr=0.0005, l1=0, pre_encoded_path=0)
     if opt.model == "omic":
         parser.set_defaults(batch_size=64, l2=5e-4)
-    if opt.task == "grad" or opt.model in ("path", "graph"):
-        parser.set_defaults(rna=0)
     if "qbt" in opt.model:
         parser.set_defaults(lr=0.0005, adam_b1=0.5)
     if opt.model in ("path", "graph"):
@@ -86,8 +80,8 @@ def parse_args():
         # Path is treated as a feature extractor and only supports PFS
         # There is only one omic datapoint per patient so no need for MIL
         raise ValueError("MIL not supported for unimodal path/omic models")
-    if opt.l1 and opt.model in ("path", "graph"):
-        raise ValueError("L1 is only enabled for the omic network (or subnetwork in MM models)")
+    if opt.l1 > 0.0 and opt.model in ("path", "graph"):
+        print("Note: L1 is only enabled for the omic network (or subnetwork in MM models)")
 
     opt = parser.parse_args(namespace=CustomNamespace())
     return opt

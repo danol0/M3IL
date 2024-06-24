@@ -41,7 +41,7 @@ def CV_Main() -> None:
             continue
 
         opt.k = k
-        utils.set_seed(2019)
+        utils.set_seed(k)
         model = utils.define_model(opt)
 
         if k == 1:
