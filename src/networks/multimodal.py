@@ -84,19 +84,16 @@ class FlexibleFusion(BaseEncoder):
     def forward(self, **kwargs: dict) -> torch.Tensor:
         p, g, o = None, None, None
 
-        if hasattr(self, "path_net"):
-            # Process raw path images
-            p = self.path_net.get_latents(**kwargs)
-            p = self.aggregate(p)
-        elif hasattr(self, "aggregate"):
-            # In this case, x_path is pre-encoded path features
-            p = self.aggregate(kwargs["x_path"])
+        if hasattr(self, "omic_net"):
+            o = self.omic_net.get_latents(**kwargs)
+
+        if hasattr(self, "aggregate"):
+            p = kwargs["x_path"]
+            o_ca = o.unsqueeze(1).expand(-1, p.size(1), -1) if o is not None else None
+            p = self.aggregate(kwargs["x_path"], o_ca)
 
         if hasattr(self, "graph_net"):
             g = self.graph_net.get_latents(**kwargs)
-
-        if hasattr(self, "omic_net"):
-            o = self.omic_net.get_latents(**kwargs)
 
         p, g, o = self.align_MM_local_MIL(p, g, o) if self.local else (p, g, o)
         x = self.fusion(f_omic=o, f_graph=g, f_path=p)

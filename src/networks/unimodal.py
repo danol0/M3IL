@@ -92,6 +92,13 @@ class BaseAttentionPool(nn.Module):
         A = self.c(A) / self.temperature
         return A
 
+    def cross_attn(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        a = self.a(x)
+        b = self.b(y)
+        A = a.mul(b)
+        A = self.c(A) / self.temperature
+        return A
+
 
 class MaskedAttentionPool(BaseAttentionPool):
     def __init__(
@@ -107,8 +114,8 @@ class MaskedAttentionPool(BaseAttentionPool):
         """
         super().__init__(fdim, hdim, dropout, temperature)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        A = self.attn(x)
+    def forward(self, x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
+        A = self.attn(x) if y is None else self.cross_attn(x, y)
         mask = torch.all(x == 0, dim=-1)
         A[mask] = -float("Inf")
         A = F.softmax(A, dim=1)
@@ -268,8 +275,8 @@ class GNN(BaseEncoder):
         padded = pad_sequence(graphs, batch_first=True, padding_value=0)
         return padded
 
-    def get_latents(self, **kwargs: torch.Tensor) -> tuple:
-        data, pat_idxs = kwargs["x_graph"]
+    def get_encoded(self, **kwargs: torch.Tensor) -> tuple:
+        data, _ = kwargs["x_graph"]
         # data.batch records the indices of individual graphs
         # pat_idxs maps these back to patients for MIL aggregation
         data = self.normalize_graphs(data)
@@ -292,7 +299,12 @@ class GNN(BaseEncoder):
             )
         x = torch.sum(torch.stack(xs), dim=0)
         x = self.encoder(x)
+        return x
+
+    def get_latents(self, **kwargs: torch.Tensor) -> tuple:
+        x = self.get_encoded(**kwargs)
         if self.aggregate:
+            _, pat_idxs = kwargs["x_graph"]
             x = self.aggregate(x, index=pat_idxs, dim_size=pat_idxs[-1].item() + 1)
         return x
 
@@ -303,33 +315,10 @@ class GNN(BaseEncoder):
             return self.predict(x, mask)
         return self.predict(x)
 
-    def freeze(self, freeze: bool) -> None:
-        dfs_freeze(self, freeze)
-
     def get_attn_score(self, single_graph) -> tuple:
-        data = single_graph
-        data = self.normalize_graphs(data)
-        x, edge_index, edge_attr, batch = (
-            data.x,
-            data.edge_index,
-            data.edge_attr,
-            data.batch,
-        )
-        xs = []
-        for conv, pool in zip(self.convs, self.pools):
-            x = F.relu(conv(x, edge_index))
-            x, edge_index, edge_attr, batch, _, _ = pool(
-                x, edge_index, edge_attr, batch
-            )
-            xs.append(
-                torch.cat(
-                    [global_max_pool(x, batch), global_mean_pool(x, batch)], dim=1
-                )
-            )
-        x = torch.sum(torch.stack(xs), dim=0)
-        x = self.encoder(x)
-        if self.aggregate:
-            A = self.aggregate.attn(x)
+        assert self.aggregate, "Attention pooling required for attention score."
+        x = self.get_encoded(x_graph=(single_graph, torch.tensor([0])))
+        A = self.aggregate.attn(x)
         return A
 
 
