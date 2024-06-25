@@ -65,7 +65,7 @@ class BaseAttentionPool(nn.Module):
         self,
         fdim: int = 32,
         hdim: int = 16,
-        dropout: float = 0,
+        dropout: float = 0.0,
         temperature: float = 1.0,
     ) -> None:
         """
@@ -98,7 +98,7 @@ class MaskedAttentionPool(BaseAttentionPool):
         self,
         fdim: int = 32,
         hdim: int = 16,
-        dropout: float = 0,
+        dropout: float = 0.0,
         temperature: float = 1.0,
     ) -> None:
         """
@@ -121,7 +121,7 @@ class GraphAttentionPool(BaseAttentionPool):
         self,
         fdim: int = 32,
         hdim: int = 16,
-        dropout: float = 0,
+        dropout: float = 0.0,
         temperature: float = 1.0,
     ) -> None:
         """
@@ -157,7 +157,7 @@ class MaskedMeanPool(nn.Module):
 
 # --- Omic ---
 class FFN(BaseEncoder):
-    def __init__(self, xdim: int = 80, fdim: int = 32, dropout: float = 0) -> None:
+    def __init__(self, xdim: int = 80, fdim: int = 32, dropout: float = 0.25) -> None:
         """
         Feedforward neural network for tabular omic data.
 
@@ -230,7 +230,7 @@ class GNN(BaseEncoder):
         if pool == "collate":
             self.aggregate = self.collate_graphs
         elif pool == "attn":
-            self.aggregate = GraphAttentionPool(fdim=fdim, hdim=fdim, dropout=0.0)
+            self.aggregate = GraphAttentionPool(fdim=fdim, hdim=fdim, dropout=dropout)
         elif pool == "mean":
             self.aggregate = MeanAggregation()
         elif pool is None:
@@ -302,6 +302,35 @@ class GNN(BaseEncoder):
             mask = torch.any(x != 0, dim=-1)
             return self.predict(x, mask)
         return self.predict(x)
+
+    def freeze(self, freeze: bool) -> None:
+        dfs_freeze(self, freeze)
+
+    def get_attn_score(self, single_graph) -> tuple:
+        data = single_graph
+        data = self.normalize_graphs(data)
+        x, edge_index, edge_attr, batch = (
+            data.x,
+            data.edge_index,
+            data.edge_attr,
+            data.batch,
+        )
+        xs = []
+        for conv, pool in zip(self.convs, self.pools):
+            x = F.relu(conv(x, edge_index))
+            x, edge_index, edge_attr, batch, _, _ = pool(
+                x, edge_index, edge_attr, batch
+            )
+            xs.append(
+                torch.cat(
+                    [global_max_pool(x, batch), global_mean_pool(x, batch)], dim=1
+                )
+            )
+        x = torch.sum(torch.stack(xs), dim=0)
+        x = self.encoder(x)
+        if self.aggregate:
+            A = self.aggregate.attn(x)
+        return A
 
 
 # --- Path ---

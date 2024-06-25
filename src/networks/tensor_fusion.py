@@ -80,6 +80,7 @@ class TensorFusion(nn.Module):
             else:
                 raise NotImplementedError("Only bimodal and trimodal fusion supported.")
 
+        # Local MIL - we're fusing over combinations in the first dimension
         elif tensors[0].dim() == 3:
             if len(tensors) == 2:
                 f = torch.einsum("bsi,bsj->bsij", *tensors).flatten(start_dim=2)

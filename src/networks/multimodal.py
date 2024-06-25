@@ -57,9 +57,7 @@ class FlexibleFusion(BaseEncoder):
             self.graph_net.load_state_dict(graph_ckpt["model"])
             if opt.graph_pool == "attn":
                 # Reset attention weights
-                self.graph_net.aggregate = GraphAttentionPool(
-                    fdim=fdim, hdim=fdim, dropout=0
-                )
+                self.graph_net.aggregate = GraphAttentionPool(fdim=fdim, hdim=fdim)
             self.graph_net = self.graph_net.to(opt.device)
             self.graph_net.freeze(True)
 
