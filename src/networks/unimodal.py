@@ -70,6 +70,7 @@ class BaseAttentionPool(nn.Module):
     ) -> None:
         """
         Computes a gated attention score over input features.
+        Optionally accepts a second input for cross attention.
 
         Args:
             fdim (int): Input feature dimension.
@@ -85,16 +86,9 @@ class BaseAttentionPool(nn.Module):
         self.c = nn.Linear(hdim, 1)
         self.temperature = temperature
 
-    def attn(self, x: torch.Tensor) -> torch.Tensor:
+    def attn(self, x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
         a = self.a(x)
-        b = self.b(x)
-        A = a.mul(b)
-        A = self.c(A) / self.temperature
-        return A
-
-    def cross_attn(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        a = self.a(x)
-        b = self.b(y)
+        b = self.b(x) if y is None else self.b(y)
         A = a.mul(b)
         A = self.c(A) / self.temperature
         return A
@@ -113,14 +107,17 @@ class MaskedAttentionPool(BaseAttentionPool):
         (batch, samples, features) -> (batch, pooled_features)
         """
         super().__init__(fdim, hdim, dropout, temperature)
+        self.nn = nn.Sequential(nn.Linear(fdim, fdim), nn.ReLU(), nn.Dropout(dropout))
 
     def forward(self, x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
-        A = self.attn(x) if y is None else self.cross_attn(x, y)
+        x = self.nn(x)
+        A = self.attn(x, y)
         mask = torch.all(x == 0, dim=-1)
         A[mask] = -float("Inf")
         A = F.softmax(A, dim=1)
         assert A.dim() == x.dim() and A.size(0) == x.size(0)
-        return torch.sum(A * x, dim=1)
+        x = torch.sum(A * x, dim=1)
+        return x
 
 
 class GraphAttentionPool(BaseAttentionPool):
@@ -138,15 +135,18 @@ class GraphAttentionPool(BaseAttentionPool):
         Adapted from: https://pytorch-geometric.readthedocs.io/en/1.3.1/_modules/torch_geometric/nn/glob/attention.html
         """
         super().__init__(fdim, hdim, dropout, temperature)
+        self.nn = nn.Sequential(nn.Linear(fdim, hdim), nn.ReLU(), nn.Dropout(dropout))
 
     def forward(
         self, x: torch.Tensor, index: torch.Tensor, dim_size: int = None
     ) -> torch.Tensor:
         dim_size = index[-1].item() + 1 if dim_size is None else dim_size
+        x = self.nn(x)
         A = self.attn(x)
         A = softmax(A, index=index, num_nodes=dim_size)
         assert A.dim() == x.dim() and A.size(0) == x.size(0)
-        return scatter(src=(A * x), index=index, reduce="add", dim_size=dim_size)
+        x = scatter(src=(A * x), index=index, reduce="add", dim_size=dim_size)
+        return x
 
 
 class MaskedMeanPool(nn.Module):
@@ -237,7 +237,7 @@ class GNN(BaseEncoder):
         if pool == "collate":
             self.aggregate = self.collate_graphs
         elif pool == "attn":
-            self.aggregate = GraphAttentionPool(fdim=fdim, hdim=fdim, dropout=dropout)
+            self.aggregate = GraphAttentionPool(fdim=fdim, hdim=fdim)
         elif pool == "mean":
             self.aggregate = MeanAggregation()
         elif pool is None:
@@ -315,9 +315,9 @@ class GNN(BaseEncoder):
             return self.predict(x, mask)
         return self.predict(x)
 
-    def get_attn_score(self, single_graph) -> tuple:
+    def get_attn_score(self, single_batched_graph) -> tuple:
         assert self.aggregate, "Attention pooling required for attention score."
-        x = self.get_encoded(x_graph=(single_graph, torch.tensor([0])))
+        x = self.get_encoded(x_graph=(single_batched_graph, torch.tensor([0])))
         A = self.aggregate.attn(x)
         return A
 

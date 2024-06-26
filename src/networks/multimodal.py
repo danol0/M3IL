@@ -55,11 +55,11 @@ class FlexibleFusion(BaseEncoder):
             # Pooling is handled within the GNN model
             self.graph_net = GNN(fdim=fdim, pool=opt.graph_pool, dropout=opt.dropout)
             self.graph_net.load_state_dict(graph_ckpt["model"])
+            self.graph_net.freeze(True)
             if opt.graph_pool == "attn":
                 # Reset attention weights
                 self.graph_net.aggregate = GraphAttentionPool(fdim=fdim, hdim=fdim)
             self.graph_net = self.graph_net.to(opt.device)
-            self.graph_net.freeze(True)
 
         if "path" in opt.model:
             assert (
@@ -87,13 +87,11 @@ class FlexibleFusion(BaseEncoder):
         if hasattr(self, "omic_net"):
             o = self.omic_net.get_latents(**kwargs)
 
-        if hasattr(self, "aggregate"):
-            p = kwargs["x_path"]
-            o_ca = o.unsqueeze(1).expand(-1, p.size(1), -1) if o is not None else None
-            p = self.aggregate(kwargs["x_path"], o_ca)
-
         if hasattr(self, "graph_net"):
             g = self.graph_net.get_latents(**kwargs)
+
+        if hasattr(self, "aggregate"):
+            p = self.aggregate(kwargs["x_path"])
 
         p, g, o = self.align_MM_local_MIL(p, g, o) if self.local else (p, g, o)
         x = self.fusion(f_omic=o, f_graph=g, f_path=p)
@@ -255,8 +253,8 @@ class QBT(nn.Module):
         opt: Namespace,
         fdim: int = 32,
         n_queries: int = 16,
-        n_heads: int = 4,
-        transformer_layers: int = 32,
+        n_heads: int = 2,
+        transformer_layers: int = 4,
     ) -> None:
         """
         Query-based transformer architecture for global multimodal fusion.
