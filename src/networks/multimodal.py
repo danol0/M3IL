@@ -135,7 +135,7 @@ class FlexibleFusion(BaseEncoder):
         rna = "_rna" if opt.rna else ""
         omic_ckpt = (
             print_load(
-                f"checkpoints/{opt.task}/omic{rna}/omic_{opt.k}.pt", device=opt.device
+                f"{opt.save_dir}/{opt.task}/omic{rna}/omic_{opt.k}.pt", device=opt.device
             )
             if "omic" in opt.model
             else None
@@ -145,7 +145,7 @@ class FlexibleFusion(BaseEncoder):
         attn = "_attn" if opt.attn_pool else ""
         graph_ckpt = (
             print_load(
-                f"checkpoints/{opt.task}/graph_{mil}{attn}/graph_{opt.k}.pt",
+                f"{opt.save_dir}/{opt.task}/graph_{mil}{attn}/graph_{opt.k}.pt",
                 device=opt.device,
             )
             if "graph" in opt.model
