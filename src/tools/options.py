@@ -57,7 +57,7 @@ def parse_args():
         parser.set_defaults(batch_size=64, l2=5e-4)
     if opt.model in ("path", "graph"):
         parser.set_defaults(l1=0)
-    if opt.model in ("pathomic", "graphomic", "pathgraphomic"):
+    if opt.model.split('_')[0] in ("pathomic", "graphomic", "pathgraphomic"):
         parser.set_defaults(n_epochs=30, lr_fix=10)
         if opt.mil == "PFS":
             parser.set_defaults(lr=0.0001)

@@ -94,7 +94,7 @@ def define_model(opt: Namespace) -> nn.Module:
     # Define graph pooling strategy
     if "graph" in opt.model:
         opt.graph_pool = None
-        if opt.mil == "local":
+        if opt.mil == "local" or 'qbt' in opt.model:
             opt.graph_pool = "collate"
         elif opt.mil == "global":
             opt.graph_pool = opt.pool
@@ -113,8 +113,8 @@ def define_model(opt: Namespace) -> nn.Module:
             raise NotImplementedError("MIL not implemented for VGG model.")
         model = build_vgg19_encoder(fdim=32)
 
-    elif opt.model in ("pathomic", "graphomic", "pathgraphomic"):
-        model = FlexibleFusion(opt, fdim=32, mmfdim=64, local=local_pool)
+    elif any(m in opt.model for m in ("pathomic", "graphomic", "pathgraphomic")):
+        model = FlexibleFusion(opt, fdim=32, mmfdim=32 if "qbt" in opt.model else 64)
     else:
         raise NotImplementedError(f"Model {opt.model} not implemented")
     return model
@@ -130,6 +130,7 @@ def define_scheduler(
         return lr_l
 
     return lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_rule)
+    # return torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer, max_lr=0.008, total_steps=850)
 
 
 def make_cv_results_table(metrics_list: list) -> str:
