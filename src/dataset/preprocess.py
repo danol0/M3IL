@@ -52,23 +52,15 @@ def get_splits(opt: Namespace, split_csv="pnas_splits.csv") -> dict:
     ), "Number of folds exceeds number of splits in CSV"
 
     if opt.pre_encoded_path and "path" in opt.model:
-        if opt.use_vggnet:
-            vgg_ftype = "surv" if opt.task == "multi" else opt.task
-            try:
-                vgg_feats = pickle.load(
-                    open(f"{data_dir}/path/vgg_features_{vgg_ftype}.pkl", "rb")
-                )
-            except FileNotFoundError:
-                raise FileNotFoundError(
-                    f"Pre-extracted VGG features not found for {vgg_ftype}"
-                )
-        else:
-            try:
-                vgg_feats = pickle.load(
-                    open(f"{data_dir}/path/resnet_features.pkl", "rb")
-                )
-            except FileNotFoundError:
-                raise FileNotFoundError("Pre-extracted ResNet features not found")
+        vgg_ftype = "surv" if opt.task == "multi" else opt.task
+        try:
+            vgg_feats = pickle.load(
+                open(f"{data_dir}/path/vgg_features_{vgg_ftype}.pkl", "rb")
+            )
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Pre-extracted VGG features not found for {vgg_ftype}"
+            )
 
     pat2roi = defaultdict(list)
     roi2patch = defaultdict(list)
@@ -78,8 +70,7 @@ def get_splits(opt: Namespace, split_csv="pnas_splits.csv") -> dict:
             # We do this with nested loops to preserve the order of the patches
             # This allows us to match the patches to parent graphs as done in the paper
             if opt.pre_encoded_path and "path" in opt.model:
-                path_dict = vgg_feats["1"] if opt.use_vggnet else vgg_feats
-                for img_fname in path_dict.keys():
+                for img_fname in vgg_feats["1"].keys():
                     if img_fname.startswith(roi_fname.rstrip(".pt")):
                         roi2patch[roi_fname.rstrip(".pt")].append(img_fname)
 
@@ -99,11 +90,7 @@ def get_splits(opt: Namespace, split_csv="pnas_splits.csv") -> dict:
                         (
                             np.stack(
                                 [
-                                    (
-                                        vgg_feats[str(k)][patch]
-                                        if opt.use_vggnet
-                                        else vgg_feats[patch]
-                                    )
+                                    vgg_feats[str(k)][patch]
                                     for roi in pat2roi[pat]
                                     for patch in roi2patch[roi]
                                 ]

@@ -31,10 +31,9 @@ def parse_args():
     parser.add_argument("--task", type=str, default="grad", choices=["multi", "surv", "grad"])
     parser.add_argument("--mil", type=str, default="PFS", choices=["PFS", "global", "local"])
     parser.add_argument("--rna", type=int, default=0, help="Use RNA data")
-    parser.add_argument("--attn_pool", type=int, default=0, choices=[0, 1], help="Use attention pooling")
+    parser.add_argument("--pool", type=str, default="mean", choices=["mean", "attn", "LSE"], help="MIL pooling method")
     parser.add_argument("--collate", type=str, default="pad", choices=["pad", "min"], help="Collation method for path data")
     parser.add_argument("--pre_encoded_path", type=int, default=1, help="Use pre-extracted VGG features")
-    parser.add_argument("--use_vggnet", type=int, default=1, help="Use VGG or ResNet for path data")
 
     # Training args
     parser.add_argument("--batch_size", type=int, default=32)
@@ -56,8 +55,6 @@ def parse_args():
         parser.set_defaults(batch_size=8, lr=0.0005, l1=0, pre_encoded_path=0)
     if opt.model == "omic":
         parser.set_defaults(batch_size=64, l2=5e-4)
-    if "qbt" in opt.model:
-        parser.set_defaults(lr=0.0005, adam_b1=0.5)
     if opt.model in ("path", "graph"):
         parser.set_defaults(l1=0)
     if opt.model in ("pathomic", "graphomic", "pathgraphomic"):
@@ -66,15 +63,8 @@ def parse_args():
             parser.set_defaults(lr=0.0001)
         else:
             parser.set_defaults(lr=0.0005)
-    # if opt.mil in ("global", "local"):
-    #     # More epochs for MIL to account for reduced dataset size
-    #     parser.set_defaults(n_epochs=60)
 
     # Sanity checks
-    if not opt.use_vggnet and not opt.pre_encoded_path:
-        raise ValueError("Must use pre-encoded path features with ResNet")
-    if opt.attn_pool and opt.mil == "PFS":
-        raise ValueError("Attention pooling requires MIL")
     if opt.collate == "min" and opt.mil == "local":
         raise ValueError("Min collation not supported with local MIL")
     if opt.model in ("path", "omic") and opt.mil != "PFS":
@@ -83,6 +73,8 @@ def parse_args():
         raise ValueError("MIL not supported for unimodal path/omic models")
     if opt.l1 > 0.0 and opt.model in ("path", "graph"):
         print("Note: L1 is only enabled for the omic network (or subnetwork in MM models)")
+    if (opt.pool == "LSE" and opt.mil in ("PFS", "global")) or (opt.pool == "attn" and opt.mil in ("local", "PFS")):
+        raise ValueError("Pooling and MIL strategies are incompatible")
 
     opt = parser.parse_args(namespace=CustomNamespace())
     return opt

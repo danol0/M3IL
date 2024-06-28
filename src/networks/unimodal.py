@@ -22,13 +22,13 @@ def dfs_freeze(model, freeze: bool) -> None:
 
 
 class BaseEncoder(nn.Module):
-    def __init__(self, fdim: int, local: bool = False) -> None:
+    def __init__(self, fdim: int, local: str = None) -> None:
         """
         Defines output layers for downstream tasks (grade, survival).
 
         Args:
             fdim (int): Processed feature dimension.
-            local (bool): If using local MIL, ie aggregating labels.
+            local (bool): If using local MIL, pooling strategy: mean, LSE.
         """
         super().__init__()
         self.grade_clf = nn.Sequential(nn.Linear(fdim, 3), nn.LogSoftmax(dim=-1))
@@ -43,8 +43,15 @@ class BaseEncoder(nn.Module):
 
         if self.local:
             assert mask is not None, "Mask required for local MIL."
-            grade = MaskedMeanPool()(grade, mask)
-            hazard = MaskedMeanPool()(hazard, mask)
+            if self.local == "mean":
+                grade = MaskedMeanPool()(grade, mask)
+                hazard = MaskedMeanPool()(hazard, mask)
+            if self.local == "LSE":
+                neg_inf = torch.full_like(grade, -float("Inf"))
+                grade = torch.where(mask.unsqueeze(-1), grade, neg_inf)
+                hazard = torch.where(mask.unsqueeze(-1), hazard, neg_inf)
+                grade = torch.logsumexp(grade, dim=1)
+                hazard = torch.logsumexp(hazard, dim=1)
 
         return x, grade, hazard
 
@@ -104,6 +111,7 @@ class MaskedAttentionPool(BaseAttentionPool):
     ) -> None:
         """
         Performs masked attention pooling over first dimension for 0 padded inputs.
+        Applied a transformation to the input features before attention.
         (batch, samples, features) -> (batch, pooled_features)
         """
         super().__init__(fdim, hdim, dropout, temperature)
@@ -130,6 +138,7 @@ class GraphAttentionPool(BaseAttentionPool):
     ) -> None:
         """
         Performs attention pooling of graph features via an index vector.
+        Applied a transformation to the input features before attention.
         (n_graphs, features) -> (batch_size, pooled_features)
 
         Adapted from: https://pytorch-geometric.readthedocs.io/en/1.3.1/_modules/torch_geometric/nn/glob/attention.html
@@ -206,6 +215,7 @@ class GNN(BaseEncoder):
         fdim: int = 32,
         pool: str = None,
         dropout: int = 0.25,
+        local: str = None,
     ) -> None:
         """
         Graph neural network for encoding histology graphs.
@@ -214,10 +224,11 @@ class GNN(BaseEncoder):
             xdim (int): Graph node dimension.
             hdim (int): Hidden layer dimension.
             fdim (int): Encoded feature dimension.
-            pool (str): MIL aggregation method: collate, attn, mean, None.
+            pool (str): Graph aggregation method: collate, attn, mean, None.
             dropout (int): Dropout rate.
+            local (str): If using local MIL, pooling strategy: mean, LSE.
         """
-        super().__init__(fdim, local=True if pool == "collate" else False)
+        super().__init__(fdim, local)
 
         hidden = [xdim, hdim, hdim]
 
@@ -318,37 +329,12 @@ class GNN(BaseEncoder):
     def get_attn_score(self, single_batched_graph) -> tuple:
         assert self.aggregate, "Attention pooling required for attention score."
         x = self.get_encoded(x_graph=(single_batched_graph, torch.tensor([0])))
+        x = self.aggregate.nn(x)
         A = self.aggregate.attn(x)
         return A
 
 
 # --- Path ---
-class ResNetClassifier(BaseEncoder):
-    def __init__(self, xdim: int = 2048, pool: str = None) -> None:
-        """
-        Skeleton classifier for pre-extracted resnet features.
-
-        Args:
-            xdim (int): Input feature dimension.
-            pool (str): MIL aggregation method: attn, mean, None.
-        """
-        super().__init__(xdim)
-
-        if pool == "attn":
-            self.aggregate = MaskedAttentionPool(fdim=xdim, hdim=xdim // 2, dropout=0)
-        elif pool == "mean":
-            self.aggregate = MaskedMeanPool()
-        elif pool is None:
-            self.aggregate = None
-        else:
-            raise NotImplementedError(f"Aggregation method {pool} not implemented.")
-
-    def forward(self, **kwargs: torch.Tensor) -> tuple:
-        x = kwargs["x_path"]
-        x = self.aggregate(x) if self.aggregate else x
-        return self.predict(x)
-
-
 class VGGNet(BaseEncoder):
     def __init__(self, vgg_layers: nn.Module, fdim: int = 32) -> None:
         """

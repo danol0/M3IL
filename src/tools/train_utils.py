@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 import wandb
 from src.networks.multimodal import FlexibleFusion
-from src.networks.unimodal import FFN, GNN, ResNetClassifier, build_vgg19_encoder
+from src.networks.unimodal import FFN, GNN, build_vgg19_encoder
 from src.tools.evaluation import evaluate
 
 
@@ -94,31 +94,27 @@ def define_model(opt: Namespace) -> nn.Module:
     # Define graph pooling strategy
     if "graph" in opt.model:
         opt.graph_pool = None
-        if opt.mil != "PFS":
-            if "qbt" in opt.model or opt.mil == "local":
-                opt.graph_pool = "collate"
-            elif opt.mil == "global":
-                opt.graph_pool = "attn" if opt.attn_pool else "mean"
+        if opt.mil == "local":
+            opt.graph_pool = "collate"
+        elif opt.mil == "global":
+            opt.graph_pool = opt.pool
+
+    # Define local pooling strategy
+    local_pool = opt.pool if opt.mil == "local" else None
 
     if opt.model == "omic":
         model = FFN(xdim=320 if opt.rna else 80, fdim=32, dropout=opt.dropout)
 
     elif opt.model == "graph":
-        model = GNN(fdim=32, pool=opt.graph_pool, dropout=opt.dropout)
+        model = GNN(fdim=32, pool=opt.graph_pool, dropout=opt.dropout, local=local_pool)
 
     elif opt.model == "path":
-        if opt.use_vggnet:
-            if opt.mil != "PFS":
-                raise NotImplementedError("MIL not implemented for VGG model.")
-            model = build_vgg19_encoder(fdim=32)
-        else:
-            pool = None
-            if opt.mil != "PFS":
-                pool = "attn" if opt.attn_pool else "mean"
-            model = ResNetClassifier(pool=pool)
+        if opt.mil != "PFS":
+            raise NotImplementedError("MIL not implemented for VGG model.")
+        model = build_vgg19_encoder(fdim=32)
 
-    elif any(m in opt.model for m in ("pathomic", "graphomic", "pathgraphomic")):
-        model = FlexibleFusion(opt, fdim=32, mmfdim=32 if "qbt" in opt.model else 64)
+    elif opt.model in ("pathomic", "graphomic", "pathgraphomic"):
+        model = FlexibleFusion(opt, fdim=32, mmfdim=64, local=local_pool)
     else:
         raise NotImplementedError(f"Model {opt.model} not implemented")
     return model
@@ -180,14 +176,14 @@ def assign_ckptdir_and_group(opt: Namespace) -> None:
     """Assigns checkpoint directory and CV group for WandB. Updates opt in place."""
 
     rna = "_rna" if (opt.rna and "omic" in opt.model) else ""
-    attn = "_attn" if opt.attn_pool else ""
+    pool = f"_{opt.pool}" if opt.pool != "mean" else ""
     # Ignore MIL for omic as there is only 1 instance per patient
     if opt.model == "omic":
         opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}"
         opt.group = f"{opt.task}_{opt.model}{rna}"
     else:
-        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}_{opt.mil}{attn}"
-        opt.group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{attn}"
+        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}_{opt.mil}{pool}"
+        opt.group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{pool}"
     print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
 
 
