@@ -13,7 +13,6 @@ from src.networks.unimodal import (
     GraphAttentionPool,
 )
 
-
 def print_load(ckpt: str, device: torch.device) -> dict:
     print(f"Loading {ckpt}")
     try:

@@ -47,12 +47,10 @@ class BaseEncoder(nn.Module):
                 grade = MaskedMeanPool()(grade, mask)
                 hazard = MaskedMeanPool()(hazard, mask)
             if self.local == "LSE":
-                neg_inf = torch.full_like(grade, -float("Inf"))
-                grade = torch.where(mask.unsqueeze(-1), grade, neg_inf)
-                hazard = torch.where(mask.unsqueeze(-1), hazard, neg_inf)
+                grade = torch.where(mask.unsqueeze(-1), grade, torch.full_like(grade, -float("Inf")))
+                hazard = torch.where(mask.unsqueeze(-1), hazard, torch.full_like(hazard, -float("Inf")))
                 grade = torch.logsumexp(grade, dim=1)
                 hazard = torch.logsumexp(hazard, dim=1)
-
         return x, grade, hazard
 
     def freeze(self, freeze: bool) -> None:
