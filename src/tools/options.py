@@ -61,13 +61,14 @@ def parse_args():
     if opt.model in ("path", "graph"):
         parser.set_defaults(l1=0)
     if opt.model in ("pathomic", "graphomic", "pathgraphomic"):
+        parser.set_defaults(n_epochs=30, lr_fix=10)
         if opt.mil == "PFS":
-            parser.set_defaults(lr=0.0001, adam_b1=0.5, lr_fix=10, n_epochs=30)
+            parser.set_defaults(lr=0.0001)
         else:
-            parser.set_defaults(lr=0.0005, adam_b1=0.5)
-    if opt.mil in ("global", "local"):
-        # More epochs for MIL to account for reduced dataset size
-        parser.set_defaults(n_epochs=60)
+            parser.set_defaults(lr=0.0005)
+    # if opt.mil in ("global", "local"):
+    #     # More epochs for MIL to account for reduced dataset size
+    #     parser.set_defaults(n_epochs=60)
 
     # Sanity checks
     if not opt.use_vggnet and not opt.pre_encoded_path:
