@@ -94,7 +94,7 @@ def define_model(opt: Namespace) -> nn.Module:
     # Define graph pooling strategy
     if "graph" in opt.model:
         opt.graph_pool = None
-        if opt.mil == "local" or 'qbt' in opt.model:
+        if opt.mil == "local" or opt.qbt:
             opt.graph_pool = "collate"
         elif opt.mil == "global":
             opt.graph_pool = opt.pool
@@ -113,8 +113,8 @@ def define_model(opt: Namespace) -> nn.Module:
             raise NotImplementedError("MIL not implemented for VGG model.")
         model = build_vgg19_encoder(fdim=32)
 
-    elif any(m in opt.model for m in ("pathomic", "graphomic", "pathgraphomic")):
-        model = FlexibleFusion(opt, fdim=32, mmfdim=32 if "qbt" in opt.model else 64)
+    elif opt.model in ("pathomic", "graphomic", "pathgraphomic"):
+        model = FlexibleFusion(opt, fdim=32, mmfdim=opt.qbt_dim if opt.qbt else 64)
     else:
         raise NotImplementedError(f"Model {opt.model} not implemented")
     return model
@@ -178,13 +178,14 @@ def assign_ckptdir_and_group(opt: Namespace) -> None:
 
     rna = "_rna" if (opt.rna and "omic" in opt.model) else ""
     pool = f"_{opt.pool}" if opt.pool != "mean" else ""
+    qbt = "_qbt" if opt.qbt else ""
     # Ignore MIL for omic as there is only 1 instance per patient
     if opt.model == "omic":
         opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}"
         opt.group = f"{opt.task}_{opt.model}{rna}"
     else:
-        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}_{opt.mil}{pool}"
-        opt.group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{pool}"
+        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}_{opt.mil}{qbt}{pool}"
+        opt.group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{qbt}{pool}"
     print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
 
 

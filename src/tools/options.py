@@ -9,7 +9,10 @@ class CustomNamespace(argparse.Namespace):
         message += "----------------- Options ---------------\n"
         for k, v in sorted(vars(self).items()):
             comment = ""
-            message += "{:>25}: {:<30}{}\n".format(str(k), str(v), comment)
+            if 'qbt' in k and self.qbt:
+                message += "{:>25}: {:<30}{}\n".format(str(k), str(v), comment)
+            elif 'qbt' not in k:
+                message += "{:>25}: {:<30}{}\n".format(str(k), str(v), comment)
         message += "----------------- End -------------------"
         return message
 
@@ -46,6 +49,13 @@ def parse_args():
     parser.add_argument("--adam_b1", type=float, default=0.9, help="Adam momentum")
     parser.add_argument("--unfreeze_unimodal", type=int, default=5, help="Epoch to unfreeze")
 
+    # QBT
+    parser.add_argument("--qbt", type=int, default=0, help="Use QBT model")
+    parser.add_argument("--qbt_queries", type=int, default=32, help="Number of queries")
+    parser.add_argument("--qbt_dim", type=int, default=16, help="Query dimension")
+    parser.add_argument("--qbt_layers", type=int, default=3, help="Number of QBT update layers")
+    parser.add_argument("--qbt_heads", type=int, default=4, help="Number of QBT attention heads")
+
     opt = parser.parse_args(namespace=CustomNamespace())
 
     # Dynamic defaults
@@ -63,6 +73,8 @@ def parse_args():
             parser.set_defaults(lr=0.0001)
         else:
             parser.set_defaults(lr=0.0005)
+    if opt.qbt:
+        parser.set_defaults(mil="global", n_epochs=30, lr_fix=10, lr=0.0001, l1=0.0005, unfreeze_unimodal=10)
 
     # Sanity checks
     if opt.collate == "min" and opt.mil == "local":
@@ -73,8 +85,10 @@ def parse_args():
         raise ValueError("MIL not supported for unimodal path/omic models")
     if opt.l1 > 0.0 and opt.model in ("path", "graph"):
         print("Note: L1 is only enabled for the omic network (or subnetwork in MM models)")
-    if (opt.pool == "LSE" and opt.mil in ("PFS", "global")) or (opt.pool == "attn" and opt.mil in ("local", "PFS")):
+    if (opt.pool == "LSE" and opt.mil in ("PFS")) or (opt.pool == "attn" and opt.mil in ("local", "PFS")):
         raise ValueError("Pooling and MIL strategies are incompatible")
+    if opt.qbt and opt.mil != "global":
+        raise ValueError("QBT only supports global MIL")
 
     opt = parser.parse_args(namespace=CustomNamespace())
     return opt
