@@ -117,13 +117,11 @@ def train(
         all_preds = make_empty_data_dict()
 
         if epoch == opt.unfreeze_unimodal:
-            if "pathomic" in opt.model:
-                pbar.set_description("Unfreezing omic")
-                model.omic_net.freeze(False)
-            if "graphomic" in opt.model:
-                pbar.set_description("Unfreezing omic and graph")
+            try:
                 model.omic_net.freeze(False)
                 model.graph_net.freeze(False)
+            except AttributeError:
+                pass
 
         for omic, path, graph, event, time, grade, patname in train_loader:
 

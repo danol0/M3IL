@@ -49,10 +49,12 @@ class FlexibleFusion(BaseEncoder):
         if "omic" in opt.model:
             self.omic_net = FFN(
                 xdim=320 if opt.rna else 80, fdim=fdim, dropout=opt.dropout
-            )
-            self.omic_net.load_state_dict(omic_ckpt["model"])
-            self.omic_net = self.omic_net.to(opt.device)
-            self.omic_net.freeze(True)
+            ) if not opt.qbt else True
+            # QBT accepts raw omic features
+            if not opt.qbt:
+                self.omic_net.load_state_dict(omic_ckpt["model"])
+                self.omic_net = self.omic_net.to(opt.device)
+                self.omic_net.freeze(True)
 
         if "graph" in opt.model:
             # Pooling is handled within the GNN model
@@ -162,7 +164,7 @@ class FlexibleFusion(BaseEncoder):
         mil = opt.mil if not opt.qbt else "local"
         graph_ckpt = (
             print_load(
-                f"{opt.save_dir}/{opt.task}/graph_{mil}{pool}/graph_{opt.k}.pt",
+                f"{opt.save_dir}/surv/graph_{mil}{pool}/graph_{opt.k}.pt",
                 device=opt.device,
             )
             if "graph" in opt.model
@@ -185,6 +187,36 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
+class UpdateQuery(nn.Module):
+    def __init__(self, dim, qdim, n_heads, attn_dropout, ffwd_dropout):
+        super().__init__()
+        self.LN = nn.LayerNorm(qdim)
+        self.cross_attn = nn.MultiheadAttention(
+            qdim, n_heads, dropout=attn_dropout, batch_first=True, kdim=dim, vdim=dim
+        )
+        self.FF = FeedForward(qdim, ffwd_dropout)
+
+    def forward(self, Q, x):
+        Q = self.LN(Q)
+        Q = Q + self.cross_attn(Q, x, x)[0]
+        Q = Q + self.FF(Q)
+        return Q
+
+
+class Decorrelate(nn.Module):
+    def __init__(self, dim, n_heads, attn_dropout):
+        super().__init__()
+        self.LN = nn.LayerNorm(dim)
+        self.correlation = nn.MultiheadAttention(
+            dim, n_heads, dropout=attn_dropout, batch_first=True
+        )
+
+    def forward(self, x):
+        x = self.LN(x)
+        x = x + self.correlation(x, x, x)[0]
+        return x
+
+
 class QBT(nn.Module):
     def __init__(
         self,
@@ -201,48 +233,24 @@ class QBT(nn.Module):
         ffwd_dropout = opt.dropout
         self.qdim = qdim
 
-        self.corrLNs = nn.ModuleDict()
-        self.correlation = nn.ModuleDict()
-        self.LNs = nn.ModuleDict()
-        self.cross_attn = nn.ModuleDict()
-        self.FF = nn.ModuleDict()
+        self.cross_attns = nn.ModuleDict()
+        self.decorrelates = nn.ModuleDict()
 
         if "graph" in opt.model:
             self.add_layers("graph", fdim, n_heads, attn_dropout, ffwd_dropout)
         if "path" in opt.model:
             self.add_layers("path", fdim, n_heads, attn_dropout, ffwd_dropout)
         if "omic" in opt.model:
-            self.add_layers(
-                "omic", 320 if opt.rna else 80, n_heads, attn_dropout, ffwd_dropout
-            )
+            self.add_layers("omic", 320 if opt.rna else 80, n_heads, 0.5, 0.4)
 
-        self.add_layers("query", qdim, n_heads, attn_dropout, ffwd_dropout)
+        self.Q_self_attn = UpdateQuery(qdim, qdim, n_heads, attn_dropout, ffwd_dropout)
 
         self.Qs = Parameter(torch.randn(n_queries, qdim), requires_grad=True)
 
     def add_layers(self, name, dim, n_heads, attn_dropout, ffwd_dropout):
-        self.LNs[name] = nn.LayerNorm(self.qdim)
-        self.cross_attn[name] = nn.ModuleList(
-            [
-                nn.MultiheadAttention(
-                    self.qdim,
-                    n_heads,
-                    dropout=attn_dropout,
-                    batch_first=True,
-                    kdim=dim,
-                    vdim=dim,
-                )
-                for _ in range(self.n)
-            ]
-        )
-        self.FF[name] = nn.ModuleList(
-            [FeedForward(self.qdim, dropout=ffwd_dropout) for _ in range(self.n)]
-        )
+        self.cross_attns[name] = nn.ModuleList([UpdateQuery(dim, self.qdim, n_heads, attn_dropout, ffwd_dropout) for _ in range(self.n)])
         if name == "path" or name == "graph":
-            self.corrLNs[name] = nn.LayerNorm(dim)
-            self.correlation[name] = nn.MultiheadAttention(
-                dim, n_heads, dropout=attn_dropout, batch_first=True
-            )
+            self.decorrelates[name] = Decorrelate(dim, n_heads, attn_dropout)
 
     def forward(self, **kwargs: dict) -> torch.Tensor:
         o, g, p = kwargs.get("f_omic"), kwargs.get("f_graph"), kwargs.get("f_path")
@@ -251,34 +259,20 @@ class QBT(nn.Module):
         batch_size = next(x for x in (o, g, p) if x is not None).size(0)
 
         if p is not None:
-            p = self.decorrelate(p, "path")
+            p = self.decorrelates["path"](p)
         if g is not None:
-            g = self.decorrelate(g, "graph")
+            g = self.decorrelates["graph"](g)
 
         Q = self.Qs.repeat(batch_size, 1, 1)
 
         for i in range(self.n):
             for x, name in zip([o, g, p], ["omic", "graph", "path"]):
                 if x is not None:
-                    Q = self.update_Qs(Q, x, name, i)
+                    Q = self.cross_attns[name][i](Q, x)
 
-            Q = self.update_Qs(Q, Q, "query", i)
+        Q = self.Q_self_attn(Q, Q)
 
         return Q.mean(dim=1)
 
-    def decorrelate(self, x, modality):
-        x = self.corrLNs[modality](x)
-        x = x + self.correlation[modality](x, x, x)[0]
-        return x
-
-    def update_Qs(self, Q, x, modality, i):
-        Q = self.LNs[modality](Q)
-        Q = Q + self.cross_attn[modality][i](Q, x, x)[0]
-        Q = Q + self.FF[modality][i](Q)
-        return Q
-
     def l1(self) -> torch.Tensor:
-        try:
-            return sum(torch.abs(W).sum() for W in self.cross_attn["omic"].parameters())
-        except AttributeError:
-            return torch.tensor(0.0, device=self.device)
+        return sum(torch.abs(W).sum() for W in self.parameters())
