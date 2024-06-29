@@ -215,7 +215,7 @@ class Decorrelate(nn.Module):
 
     def forward(self, x, mask=None):
         x = self.LN(x)
-        x = x + self.correlation(x, x, x, attn_mask=mask, need_weights=False)[0]
+        x = x + self.correlation(x, x, x, key_padding_mask=mask, need_weights=False)[0]
         return x
 
 
@@ -275,7 +275,7 @@ class QBT(nn.Module):
 
         if p is not None:
             p_mask = torch.all(p == 0, dim=-1)
-            p = self.decorrelate["path"](p)
+            p = self.decorrelate["path"](p, mask=p_mask)
 
         if g is not None:
             g_mask = torch.all(g == 0, dim=-1)
