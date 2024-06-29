@@ -47,9 +47,11 @@ class FlexibleFusion(BaseEncoder):
         omic_ckpt, graph_ckpt = self.get_unimodal_ckpts(opt)
 
         if "omic" in opt.model:
-            self.omic_net = FFN(
-                xdim=320 if opt.rna else 80, fdim=fdim, dropout=opt.dropout
-            ) if not opt.qbt else True
+            self.omic_net = (
+                FFN(xdim=320 if opt.rna else 80, fdim=fdim, dropout=opt.dropout)
+                if not opt.qbt
+                else True
+            )
             # QBT accepts raw omic features
             if not opt.qbt:
                 self.omic_net.load_state_dict(omic_ckpt["model"])
@@ -72,7 +74,7 @@ class FlexibleFusion(BaseEncoder):
             ), "Pre-extracted path features must be used for MM models."
             # Unlike graphs, path images are not aggregated in their encoder/as pre-extracted features
             self.aggregate = nn.Identity()
-            if opt.mil == "global":
+            if opt.mil == "global" and not opt.qbt:
                 self.aggregate = (
                     MaskedAttentionPool(fdim=fdim, hdim=fdim // 2, dropout=opt.dropout)
                     if opt.pool == "attn"
@@ -196,9 +198,9 @@ class UpdateQuery(nn.Module):
         )
         self.FF = FeedForward(qdim, ffwd_dropout)
 
-    def forward(self, Q, x):
+    def forward(self, Q, x, mask=None):
         Q = self.LN(Q)
-        Q = Q + self.cross_attn(Q, x, x)[0]
+        Q = Q + self.cross_attn(Q, x, x, key_padding_mask=mask, need_weights=False)[0]
         Q = Q + self.FF(Q)
         return Q
 
@@ -211,9 +213,9 @@ class Decorrelate(nn.Module):
             dim, n_heads, dropout=attn_dropout, batch_first=True
         )
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         x = self.LN(x)
-        x = x + self.correlation(x, x, x)[0]
+        x = x + self.correlation(x, x, x, attn_mask=mask, need_weights=False)[0]
         return x
 
 
@@ -225,50 +227,72 @@ class QBT(nn.Module):
         qdim: int = 64,
         n_queries: int = 32,
         n_heads: int = 4,
-        layers: int = 3,
+        layers: int = 2,
     ) -> None:
         super().__init__()
         self.n = layers
-        attn_dropout = opt.dropout
-        ffwd_dropout = opt.dropout
+        self.attn_dropout = opt.dropout
+        self.ffwd_dropout = opt.dropout
         self.qdim = qdim
-
+        omic_xdim = 320 if opt.rna else 80
         self.cross_attns = nn.ModuleDict()
-        self.decorrelates = nn.ModuleDict()
+        self.decorrelate = nn.ModuleDict()
 
         if "graph" in opt.model:
-            self.add_layers("graph", fdim, n_heads, attn_dropout, ffwd_dropout)
-        if "path" in opt.model:
-            self.add_layers("path", fdim, n_heads, attn_dropout, ffwd_dropout)
-        if "omic" in opt.model:
-            self.add_layers("omic", 320 if opt.rna else 80, n_heads, 0.5, 0.4)
+            self.add_layers("graph", fdim, n_heads)
 
-        self.Q_self_attn = UpdateQuery(qdim, qdim, n_heads, attn_dropout, ffwd_dropout)
+        if "path" in opt.model:
+            self.add_layers("path", fdim, n_heads)
+
+        if "omic" in opt.model:
+            self.add_layers("omic", omic_xdim, n_heads)
+
+        self.Q_self_attn = UpdateQuery(
+            qdim, qdim, n_heads, self.attn_dropout, self.ffwd_dropout
+        )
 
         self.Qs = Parameter(torch.randn(n_queries, qdim), requires_grad=True)
 
-    def add_layers(self, name, dim, n_heads, attn_dropout, ffwd_dropout):
-        self.cross_attns[name] = nn.ModuleList([UpdateQuery(dim, self.qdim, n_heads, attn_dropout, ffwd_dropout) for _ in range(self.n)])
+        self.predict = nn.Sequential(
+            nn.Linear(qdim + fdim, qdim), nn.SELU(), nn.Dropout(opt.dropout)
+        )
+
+    def add_layers(self, name, dim, n_heads):
+        self.cross_attns[name] = nn.ModuleList(
+            [
+                UpdateQuery(
+                    dim, self.qdim, n_heads, self.attn_dropout, self.ffwd_dropout
+                )
+                for _ in range(self.n)
+            ]
+        )
         if name == "path" or name == "graph":
-            self.decorrelates[name] = Decorrelate(dim, n_heads, attn_dropout)
+            self.decorrelate[name] = Decorrelate(dim, n_heads, self.attn_dropout)
 
     def forward(self, **kwargs: dict) -> torch.Tensor:
         o, g, p = kwargs.get("f_omic"), kwargs.get("f_graph"), kwargs.get("f_path")
-        o, p = (x.unsqueeze(1) if x is not None else None for x in (o, p))
-
-        batch_size = next(x for x in (o, g, p) if x is not None).size(0)
+        p_mask, g_mask = None, None
 
         if p is not None:
-            p = self.decorrelates["path"](p)
-        if g is not None:
-            g = self.decorrelates["graph"](g)
+            p_mask = torch.all(p == 0, dim=-1)
+            p = self.decorrelate["path"](p)
 
+        if g is not None:
+            g_mask = torch.all(g == 0, dim=-1)
+            g = self.decorrelate["graph"](g, mask=g_mask)
+
+        if o is not None:
+            o = o.unsqueeze(1)
+
+        batch_size = next(x for x in (o, g, p) if x is not None).size(0)
         Q = self.Qs.repeat(batch_size, 1, 1)
 
         for i in range(self.n):
-            for x, name in zip([o, g, p], ["omic", "graph", "path"]):
+            for x, mask, name in zip(
+                [o, g, p], [None, g_mask, p_mask], ["omic", "graph", "path"]
+            ):
                 if x is not None:
-                    Q = self.cross_attns[name][i](Q, x)
+                    Q = self.cross_attns[name][i](Q, x, mask=mask)
 
         Q = self.Q_self_attn(Q, Q)
 

@@ -119,10 +119,17 @@ class MaskedAttentionPool(BaseAttentionPool):
         super().__init__(fdim, hdim, dropout, temperature)
         self.nn = nn.Sequential(nn.Linear(fdim, fdim), nn.ReLU(), nn.Dropout(dropout))
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, y: torch.Tensor = None, mask=None
+    ) -> torch.Tensor:
+        if mask is None:
+            assert not torch.any(
+                torch.all(x == 0, dim=(1, 2))
+            ), "All-zero batch detected."
+            mask = torch.all(x == 0, dim=-1)
+        assert x.dim() == mask.dim() + 1 and x.size()[:2] == mask.size()
         x = self.nn(x)
         A = self.attn(x, y)
-        mask = torch.all(x == 0, dim=-1)
         A[mask] = -float("Inf")
         A = F.softmax(A, dim=1)
         assert A.dim() == x.dim() and A.size(0) == x.size(0)
@@ -165,8 +172,10 @@ class MaskedMeanPool(nn.Module):
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         if mask is None:
+            assert not torch.any(
+                torch.all(x == 0, dim=(1, 2))
+            ), "All-zero batch detected."
             mask = torch.any(x != 0, dim=-1)
-            assert torch.all(mask.any(dim=1)), "All-zero batch detected."
         else:
             assert x.dim() == mask.dim() + 1 and x.size()[:2] == mask.size()[:2]
             x = x * mask.unsqueeze(-1)
