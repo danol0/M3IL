@@ -159,10 +159,10 @@ class FlexibleFusion(BaseEncoder):
             else None
         )
         pool = f"_{opt.pool}" if opt.pool != "mean" else ""
-        pool = "local" if opt.qbt else pool
+        mil = opt.mil if not opt.qbt else "local"
         graph_ckpt = (
             print_load(
-                f"{opt.save_dir}/{opt.task}/graph_{opt.mil}{pool}/graph_{opt.k}.pt",
+                f"{opt.save_dir}/{opt.task}/graph_{mil}{pool}/graph_{opt.k}.pt",
                 device=opt.device,
             )
             if "graph" in opt.model
