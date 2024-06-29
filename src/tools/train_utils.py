@@ -184,7 +184,9 @@ def assign_ckptdir_and_group(opt: Namespace) -> None:
         opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}"
         opt.group = f"{opt.task}_{opt.model}{rna}"
     else:
-        opt.ckpt_dir = f"{opt.save_dir}/{opt.task}/{opt.model}{rna}_{opt.mil}{qbt}{pool}"
+        opt.ckpt_dir = (
+            f"{opt.save_dir}/{opt.task}/{opt.model}{rna}_{opt.mil}{qbt}{pool}"
+        )
         opt.group = f"{opt.task}_{opt.model}{rna}_{opt.mil}{qbt}{pool}"
     print(f"Checkpoint dir: ./{opt.ckpt_dir}/")
 

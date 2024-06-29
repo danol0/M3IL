@@ -77,10 +77,17 @@ class FlexibleFusion(BaseEncoder):
                     else MaskedMeanPool()
                 )
         # --- Fusion ---
-        self.qbt = opt.qbt # For L1
+        self.qbt = opt.qbt
         if self.qbt:
             assert opt.mil != "PFS", "QBT only supports MIL."
-            self.fusion = QBT(opt, fdim=fdim, qdim=mmfdim, n_queries=opt.qbt_queries, n_heads=opt.qbt_heads, layers=opt.qbt_layers)
+            self.fusion = QBT(
+                opt,
+                fdim=fdim,
+                qdim=mmfdim,
+                n_queries=opt.qbt_queries,
+                n_heads=opt.qbt_heads,
+                layers=opt.qbt_layers,
+            )
         else:
             self.fusion = define_tensor_fusion(opt, mmfdim=mmfdim)
 
@@ -88,7 +95,11 @@ class FlexibleFusion(BaseEncoder):
         p, g, o = None, None, None
 
         if hasattr(self, "omic_net"):
-            o = self.omic_net.get_latents(**kwargs)
+            if self.qbt:
+                # QBT accepts raw omic features
+                o = kwargs["x_omic"]
+            else:
+                o = self.omic_net.get_latents(**kwargs)
 
         if hasattr(self, "graph_net"):
             g = self.graph_net.get_latents(**kwargs)
@@ -130,11 +141,11 @@ class FlexibleFusion(BaseEncoder):
         return p, g, o
 
     def l1(self) -> torch.Tensor:
-        reg = sum(torch.abs(W).sum() for W in self.omic_net.parameters())
         if self.qbt:
-            reg += sum(torch.abs(W).sum() for W in self.fusion.parameters())
-        # We only regularise the omic network in MM models
-        return sum(torch.abs(W).sum() for W in self.omic_net.parameters())
+            return self.fusion.l1()
+        else:
+            # We only regularise the omic network in MM models
+            return sum(torch.abs(W).sum() for W in self.omic_net.parameters())
 
     @staticmethod
     def get_unimodal_ckpts(opt: Namespace) -> tuple:
@@ -151,7 +162,7 @@ class FlexibleFusion(BaseEncoder):
         pool = "local" if opt.qbt else pool
         graph_ckpt = (
             print_load(
-                f"{opt.save_dir}/{opt.task}/graph_{pool}/graph_{opt.k}.pt",
+                f"{opt.save_dir}/{opt.task}/graph_{opt.mil}{pool}/graph_{opt.k}.pt",
                 device=opt.device,
             )
             if "graph" in opt.model
@@ -173,6 +184,7 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+
 class QBT(nn.Module):
     def __init__(
         self,
@@ -185,8 +197,8 @@ class QBT(nn.Module):
     ) -> None:
         super().__init__()
         self.n = layers
-        attn_dropout = 0.25
-        ffwd_dropout = 0.25
+        attn_dropout = opt.dropout
+        ffwd_dropout = opt.dropout
         self.qdim = qdim
 
         self.corrLNs = nn.ModuleDict()
@@ -196,29 +208,41 @@ class QBT(nn.Module):
         self.FF = nn.ModuleDict()
 
         if "graph" in opt.model:
-            self.add_layers('graph', fdim, n_heads, attn_dropout, ffwd_dropout)
+            self.add_layers("graph", fdim, n_heads, attn_dropout, ffwd_dropout)
         if "path" in opt.model:
-            self.add_layers('path', fdim, n_heads, attn_dropout, ffwd_dropout)
+            self.add_layers("path", fdim, n_heads, attn_dropout, ffwd_dropout)
         if "omic" in opt.model:
-            self.add_layers('omic', fdim, n_heads, attn_dropout, ffwd_dropout)
+            self.add_layers(
+                "omic", 320 if opt.rna else 80, n_heads, attn_dropout, ffwd_dropout
+            )
 
-        self.add_layers('query', qdim, n_heads, attn_dropout, ffwd_dropout)
+        self.add_layers("query", qdim, n_heads, attn_dropout, ffwd_dropout)
 
         self.Qs = Parameter(torch.randn(n_queries, qdim), requires_grad=True)
 
-
     def add_layers(self, name, dim, n_heads, attn_dropout, ffwd_dropout):
         self.LNs[name] = nn.LayerNorm(self.qdim)
-        self.cross_attn[name] = nn.ModuleList([
-            nn.MultiheadAttention(self.qdim, n_heads, dropout=attn_dropout, batch_first=True, kdim=dim, vdim=dim)
-            for _ in range(self.n)
-        ])
-        self.FF[name] = nn.ModuleList([
-            FeedForward(self.qdim, dropout=ffwd_dropout) for _ in range(self.n)
-        ])
-        if name == 'path' or name == 'graph':
+        self.cross_attn[name] = nn.ModuleList(
+            [
+                nn.MultiheadAttention(
+                    self.qdim,
+                    n_heads,
+                    dropout=attn_dropout,
+                    batch_first=True,
+                    kdim=dim,
+                    vdim=dim,
+                )
+                for _ in range(self.n)
+            ]
+        )
+        self.FF[name] = nn.ModuleList(
+            [FeedForward(self.qdim, dropout=ffwd_dropout) for _ in range(self.n)]
+        )
+        if name == "path" or name == "graph":
             self.corrLNs[name] = nn.LayerNorm(dim)
-            self.correlation[name] = nn.MultiheadAttention(dim, n_heads, dropout=attn_dropout, batch_first=True)
+            self.correlation[name] = nn.MultiheadAttention(
+                dim, n_heads, dropout=attn_dropout, batch_first=True
+            )
 
     def forward(self, **kwargs: dict) -> torch.Tensor:
         o, g, p = kwargs.get("f_omic"), kwargs.get("f_graph"), kwargs.get("f_path")
@@ -227,18 +251,18 @@ class QBT(nn.Module):
         batch_size = next(x for x in (o, g, p) if x is not None).size(0)
 
         if p is not None:
-            p = self.decorrelate(p, 'path')
+            p = self.decorrelate(p, "path")
         if g is not None:
-            g = self.decorrelate(g, 'graph')
+            g = self.decorrelate(g, "graph")
 
         Q = self.Qs.repeat(batch_size, 1, 1)
 
         for i in range(self.n):
-            for x, name in zip([o, g, p], ['omic', 'graph', 'path']):
+            for x, name in zip([o, g, p], ["omic", "graph", "path"]):
                 if x is not None:
                     Q = self.update_Qs(Q, x, name, i)
 
-            Q = self.update_Qs(Q, Q, 'query', i)
+            Q = self.update_Qs(Q, Q, "query", i)
 
         return Q.mean(dim=1)
 
@@ -252,3 +276,9 @@ class QBT(nn.Module):
         Q = Q + self.cross_attn[modality][i](Q, x, x)[0]
         Q = Q + self.FF[modality][i](Q)
         return Q
+
+    def l1(self) -> torch.Tensor:
+        try:
+            return sum(torch.abs(W).sum() for W in self.cross_attn["omic"].parameters())
+        except AttributeError:
+            return torch.tensor(0.0, device=self.device)

@@ -52,7 +52,7 @@ def parse_args():
     # QBT
     parser.add_argument("--qbt", type=int, default=0, help="Use QBT model")
     parser.add_argument("--qbt_queries", type=int, default=32, help="Number of queries")
-    parser.add_argument("--qbt_dim", type=int, default=16, help="Query dimension")
+    parser.add_argument("--qbt_dim", type=int, default=32, help="Query dimension")
     parser.add_argument("--qbt_layers", type=int, default=3, help="Number of QBT update layers")
     parser.add_argument("--qbt_heads", type=int, default=4, help="Number of QBT attention heads")
 
@@ -74,7 +74,7 @@ def parse_args():
         else:
             parser.set_defaults(lr=0.0005)
     if opt.qbt:
-        parser.set_defaults(mil="global", n_epochs=30, lr_fix=10, lr=0.0001, l1=0.0005, unfreeze_unimodal=10)
+        parser.set_defaults(n_epochs=50, lr_fix=10, lr=0.0001, l1=0.001, unfreeze_unimodal=10)
 
     # Sanity checks
     if opt.collate == "min" and opt.mil == "local":
@@ -89,6 +89,8 @@ def parse_args():
         raise ValueError("Pooling and MIL strategies are incompatible")
     if opt.qbt and opt.mil != "global":
         raise ValueError("QBT only supports global MIL")
+    if opt.qbt and opt.model not in ("pathomic", "graphomic", "pathgraphomic"):
+        raise ValueError("QBT only supports multimodal models")
 
     opt = parser.parse_args(namespace=CustomNamespace())
     return opt
