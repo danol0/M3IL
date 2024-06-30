@@ -43,7 +43,7 @@ python train.py --mode pathgraphomic --task grad --mil global --qbt_queries 16 -
 
 
 ## Data
-The required data is available from the original study on [Google Drive](https://drive.google.com/drive/folders/1swiMrz84V3iuzk8x99vGIBd5FCVncOlf)
+The required data is available from the original study on [Google Drive](https://drive.google.com/drive/folders/1swiMrz84V3iuzk8x99vGIBd5FCVncOlf).
 
 This project expects the data to be in a slightly modified structure:
 ```
@@ -64,7 +64,7 @@ data
 │   ├── pnas_splits.csv
 
 ```
-The graphs are in an outdated PyG format, and may need to be updated - a script for doing so is provided in the `helper.ipynb` notebook.
+The graphs are in an outdated PyG format, and may need to be updated - a script for doing so is provided in the `helper.ipynb` notebook. Due to the large number of models trained in this study, checkpoints have not been included here but are available on request.
 
 ## Docker
 
@@ -86,3 +86,6 @@ To run the simplest model to check the environment, run:
 python train.py --dry_run 1 --folds 1
 ```
 You may wish to disable WandB logging by setting the environment variable `WANDB_MODE=dryrun` (which the `--dry_run` flag does automatically, as well as disable saving).
+
+### Acknowledgements
+Please note that elements of this implementation have been adapted from that of the original study, found [here](https://github.com/mahmoodlab/PathomicFusion).
