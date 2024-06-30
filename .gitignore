@@ -12,11 +12,12 @@ wandb/*
 figs/*
 *.pkl
 config/*
-report/*
 z/*
 *.sh
 *.log
 machine*
 cache/*
+report/figures/*
+report/*.*
 !report/figures/QBT.png
 !report/M3IL.pdf
