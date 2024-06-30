@@ -9,7 +9,6 @@ wandb/*
 !requirements.txt
 *.zip
 *.DS_Store
-env.yml
 figs/*
 *.pkl
 config/*
@@ -19,3 +18,5 @@ z/*
 *.log
 machine*
 cache/*
+!report/figures/QBT.png
+!report/M3IL.pdf
