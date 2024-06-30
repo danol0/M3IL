@@ -52,7 +52,7 @@ def parse_args():
     # QBT
     parser.add_argument("--qbt", type=int, default=0, help="Use QBT model")
     parser.add_argument("--qbt_queries", type=int, default=48, help="Number of queries")
-    parser.add_argument("--qbt_dim", type=int, default=32, help="Query dimension")
+    parser.add_argument("--qbt_dim", type=int, default=16, help="Query dimension")
     parser.add_argument("--qbt_layers", type=int, default=2, help="Number of QBT update layers")
     parser.add_argument("--qbt_heads", type=int, default=8, help="Number of QBT attention heads")
 
@@ -74,7 +74,7 @@ def parse_args():
         else:
             parser.set_defaults(lr=0.0005)
     if opt.qbt:
-        parser.set_defaults(n_epochs=50, lr_fix=10, lr=0.0001, l1=0.0005, unfreeze_unimodal=-1, dropout=0.3)
+        parser.set_defaults(n_epochs=50, lr_fix=10, lr=0.0001, l1=0.0005, unfreeze_unimodal=-1)
 
     # Sanity checks
     if opt.collate == "min" and opt.mil == "local":
