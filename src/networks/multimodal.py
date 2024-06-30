@@ -13,7 +13,6 @@ from src.networks.unimodal import (
     GraphAttentionPool,
 )
 from torch.nn.parameter import Parameter
-import torch.nn.functional as F
 
 
 def print_load(ckpt: str, device: torch.device) -> dict:
@@ -80,6 +79,7 @@ class FlexibleFusion(BaseEncoder):
                     if opt.pool == "attn"
                     else MaskedMeanPool()
                 )
+
         # --- Fusion ---
         self.qbt = opt.qbt
         if self.qbt:
@@ -162,7 +162,7 @@ class FlexibleFusion(BaseEncoder):
             if "omic" in opt.model
             else None
         )
-        pool = f"_{opt.pool}" if opt.pool != "mean" else ""
+        pool = f"_{opt.pool}" if opt.pool != "mean" and not opt.qbt else ""
         mil = opt.mil if not opt.qbt else "local"
         graph_ckpt = (
             print_load(
@@ -175,6 +175,7 @@ class FlexibleFusion(BaseEncoder):
         return omic_ckpt, graph_ckpt
 
 
+# --- QBT ---
 class FeedForward(nn.Module):
     def __init__(self, dim, dropout=0.0):
         super().__init__()
@@ -189,7 +190,7 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
-class UpdateQuery(nn.Module):
+class CrossAttention(nn.Module):
     def __init__(self, dim, qdim, n_heads, attn_dropout, ffwd_dropout):
         super().__init__()
         self.LN = nn.LayerNorm(qdim)
@@ -228,13 +229,29 @@ class QBT(nn.Module):
         n_queries: int = 32,
         n_heads: int = 4,
         layers: int = 2,
+        share_params: bool = True,
     ) -> None:
+        """
+        Query Based Transformer model for multimodal fusion and MIL aggregation.
+
+        Args:
+            opt (Namespace): Command line arguments, specifying model and task
+            fdim (int): Dimension of feature vector for non-omics embeddings.
+            qdim (int): Feature dimension of query vector.
+            n_queries (int): Number of queries.
+            n_heads (int): Number of attention heads.
+            layers (int): Number of transformer update layers.
+            share_params (bool): Whether to share parameters across layers.
+        """
+
         super().__init__()
         self.n = layers
         self.attn_dropout = opt.dropout
         self.ffwd_dropout = opt.dropout
         self.qdim = qdim
         omic_xdim = 320 if opt.rna else 80
+        self.share_params = share_params
+
         self.cross_attns = nn.ModuleDict()
         self.decorrelate = nn.ModuleDict()
 
@@ -247,7 +264,7 @@ class QBT(nn.Module):
         if "omic" in opt.model:
             self.add_layers("omic", omic_xdim, n_heads)
 
-        self.Q_self_attn = UpdateQuery(
+        self.Q_self_attn = CrossAttention(
             qdim, qdim, n_heads, self.attn_dropout, self.ffwd_dropout
         )
 
@@ -258,12 +275,13 @@ class QBT(nn.Module):
         )
 
     def add_layers(self, name, dim, n_heads):
+        n = 1 if self.share_params else self.n
         self.cross_attns[name] = nn.ModuleList(
             [
-                UpdateQuery(
+                CrossAttention(
                     dim, self.qdim, n_heads, self.attn_dropout, self.ffwd_dropout
                 )
-                for _ in range(self.n)
+                for _ in range(n)
             ]
         )
         if name == "path" or name == "graph":
@@ -275,11 +293,11 @@ class QBT(nn.Module):
 
         if p is not None:
             p_mask = torch.all(p == 0, dim=-1)
-            p = self.decorrelate["path"](p, mask=p_mask)
+            p = self.decorrelate["path"](p, mask=p_mask) if g is not None else p
 
         if g is not None:
             g_mask = torch.all(g == 0, dim=-1)
-            g = self.decorrelate["graph"](g, mask=g_mask)
+            g = self.decorrelate["graph"](g, mask=g_mask) if p is not None else g
 
         if o is not None:
             o = o.unsqueeze(1)
@@ -291,6 +309,7 @@ class QBT(nn.Module):
             for x, mask, name in zip(
                 [o, g, p], [None, g_mask, p_mask], ["omic", "graph", "path"]
             ):
+                i = 0 if self.share_params else i
                 if x is not None:
                     Q = self.cross_attns[name][i](Q, x, mask=mask)
 

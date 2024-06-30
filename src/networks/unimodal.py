@@ -175,10 +175,12 @@ class MaskedMeanPool(nn.Module):
             assert not torch.any(
                 torch.all(x == 0, dim=(1, 2))
             ), "All-zero batch detected."
-            mask = torch.any(x != 0, dim=-1)
+            mask = torch.any(x == 0, dim=-1)
         else:
             assert x.dim() == mask.dim() + 1 and x.size()[:2] == mask.size()[:2]
+            mask = ~mask
             x = x * mask.unsqueeze(-1)
+        assert mask.sum(dim=1, keepdim=True).all()
         return x.sum(dim=1) / mask.sum(dim=1, keepdim=True)
 
 
