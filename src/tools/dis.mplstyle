@@ -8,8 +8,7 @@ xtick.minor.visible : True
 ytick.minor.visible : True
 
 font.size : 12
-font.family : serif
-font.serif = Times New Roman
+font.family : sans serif
 
 errorbar.capsize : 2
 
